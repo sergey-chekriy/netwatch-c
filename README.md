@@ -1,6 +1,8 @@
 # netwatch-c
 
 `netwatch-c` is a small macOS network connection watcher written in C.
+The C version has no external package-manager dependencies. The JSON parser is vendored as source code under `third_party/cjson/`, so the tool can be built with the macOS C compiler and `make`.
+See also Rust version: https://github.com/sergey-chekriy/netwatch-rs
 
 It periodically checks active TCP connections, compares the process name and executable path against an allowlist, writes suspicious connections to a log, and can optionally turn Wi-Fi off when something unexpected is detected.
 
