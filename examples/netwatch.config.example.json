@@ -1,0 +1,56 @@
+{
+  "dryRun": true,
+  "interface": "Wi-Fi",
+  "denyPatterns": [
+    "144.172.104.196",
+    "165.140.86.183",
+    ":1247",
+    ":2246",
+    ".task",
+    "parser",
+    "font3",
+    "plog3",
+    "npm-compiler"
+  ],
+  "allowProcesses": {
+    "rapportd": "/usr/libexec/rapportd",
+    "ControlCe": "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter",
+    "ControlCenter": "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter",
+    "trustd": "/usr/libexec/trustd",
+    "ChatGPT": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+    "ChatGPTHe": "/Applications/ChatGPT.app/Contents/Resources/ChatGPTHelper",
+    "Google": "/Applications/Google Chrome.app/Contents/*",
+    "AMPLibrar": "/System/Library/PrivateFrameworks/AMPLibrary.framework/*",
+    "com.apple": "/System/Volumes/Preboot/Cryptexes/App/System/Library/StagedFrameworks/Safari/*",
+    "plugin_ho": [
+      "/Applications/Firefox.app/Contents/*",
+      "/Applications/ONLYOFFICE.app/Contents/*",
+      "/Applications/Google Chrome.app/Contents/*",
+      "/Applications/Yandex.app/Contents/*"
+    ],
+    "Telegram": "/Applications/Telegram.app/Contents/MacOS/Telegram",
+    "firefox": "/Applications/Firefox.app/Contents/MacOS/firefox",
+    "parsecd": "/System/Library/PrivateFrameworks/ParsecSupport.framework/*",
+    "itunesclo": "/System/Library/PrivateFrameworks/iTunesCloud.framework/*",
+    "commerce": "/System/Library/PrivateFrameworks/CommerceKit.framework/*",
+    "ONLYOFFIC": "/Applications/ONLYOFFICE.app/Contents/*",
+    "editors_h": "/Applications/ONLYOFFICE.app/Contents/*",
+    "VMware": "/Applications/VMware Fusion.app/Contents/*",
+    "PDFgear": "/Applications/PDFgear.app/Contents/*",
+    "storekita": "/System/Library/Frameworks/StoreKit.framework/Support/storekitagent",
+    "ollama": [
+      "/Applications/Ollama.app/Contents/*",
+      "/usr/local/bin/ollama",
+      "/opt/homebrew/bin/ollama"
+    ],
+    "Docker": "/Applications/Docker.app/Contents/*",
+    "com.docke": "/Applications/Docker.app/Contents/*",
+    "helpd": "/System/Library/PrivateFrameworks/HelpData.framework/Versions/A/Resources/helpd",
+    "WeatherWi": "/System/Applications/Weather.app/Contents/PlugIns/WeatherWidget.appex/Contents/MacOS/WeatherWidget",
+    "ssh": "/usr/bin/ssh",
+    "Mail": "/System/Applications/Mail.app/Contents/MacOS/Mail",
+    "WhatsApp": "/Applications/WhatsApp.app/Contents/MacOS/WhatsApp",
+    "AmneziaVP": "/Applications/AmneziaVPN.app/Contents/MacOS/AmneziaVPN"
+  },
+  "allowRemoteHosts": []
+}
