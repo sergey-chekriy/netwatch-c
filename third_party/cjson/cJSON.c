@@ -76,6 +76,31 @@ static cJSON *parse_literal(Parser *ps, const char *lit, int type){
   ps->p += n; return new_item(type);
 }
 
+static cJSON *parse_number(Parser *ps){
+  const char *start = ps->p;
+  if (*ps->p == '-') ps->p++;
+  if (*ps->p == '0') ps->p++;
+  else if (*ps->p >= '1' && *ps->p <= '9') while (isdigit((unsigned char)*ps->p)) ps->p++;
+  else return NULL;
+  if (*ps->p == '.'){
+    ps->p++;
+    if (!isdigit((unsigned char)*ps->p)) return NULL;
+    while (isdigit((unsigned char)*ps->p)) ps->p++;
+  }
+  if (*ps->p == 'e' || *ps->p == 'E'){
+    ps->p++;
+    if (*ps->p == '+' || *ps->p == '-') ps->p++;
+    if (!isdigit((unsigned char)*ps->p)) return NULL;
+    while (isdigit((unsigned char)*ps->p)) ps->p++;
+  }
+  cJSON *item = new_item(cJSON_Number); if (!item) return NULL;
+  size_t n = (size_t)(ps->p - start);
+  item->valuestring = malloc(n + 1);
+  if (!item->valuestring){ cJSON_Delete(item); return NULL; }
+  memcpy(item->valuestring, start, n); item->valuestring[n] = 0;
+  return item;
+}
+
 static cJSON *parse_array(Parser *ps){
   if (*ps->p != '[') return NULL;
   ps->p++; skip_ws(ps);
@@ -113,6 +138,7 @@ static cJSON *parse_value(Parser *ps){
   if (*ps->p == '{') return parse_object(ps);
   if (*ps->p == '[') return parse_array(ps);
   if (*ps->p == '"') return parse_string(ps);
+  if (*ps->p == '-' || isdigit((unsigned char)*ps->p)) return parse_number(ps);
   if (!strncmp(ps->p, "true", 4)) return parse_literal(ps, "true", cJSON_True);
   if (!strncmp(ps->p, "false", 5)) return parse_literal(ps, "false", cJSON_False);
   if (!strncmp(ps->p, "null", 4)) return parse_literal(ps, "null", cJSON_NULL);

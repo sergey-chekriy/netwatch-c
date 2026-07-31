@@ -1,5 +1,8 @@
 {
+  "version": 2,
   "dryRun": true,
+  "allowAppleSystemComponents": true,
+  "trustedPublishers": {},
   "interface": "Wi-Fi",
   "denyPatterns": [
     "144.172.104.196",
@@ -13,10 +16,6 @@
     "npm-compiler"
   ],
   "allowProcesses": {
-    "rapportd": "/usr/libexec/rapportd",
-    "ControlCe": "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter",
-    "ControlCenter": "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter",
-    "trustd": "/usr/libexec/trustd",
     "ChatGPT": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
     "ChatGPTHe": "/Applications/ChatGPT.app/Contents/Resources/ChatGPTHelper",
     "Google": "/Applications/Google Chrome.app/Contents/*",
@@ -37,7 +36,6 @@
     "editors_h": "/Applications/ONLYOFFICE.app/Contents/*",
     "VMware": "/Applications/VMware Fusion.app/Contents/*",
     "PDFgear": "/Applications/PDFgear.app/Contents/*",
-    "storekita": "/System/Library/Frameworks/StoreKit.framework/Support/storekitagent",
     "ollama": [
       "/Applications/Ollama.app/Contents/*",
       "/usr/local/bin/ollama",
@@ -45,10 +43,7 @@
     ],
     "Docker": "/Applications/Docker.app/Contents/*",
     "com.docke": "/Applications/Docker.app/Contents/*",
-    "helpd": "/System/Library/PrivateFrameworks/HelpData.framework/Versions/A/Resources/helpd",
-    "WeatherWi": "/System/Applications/Weather.app/Contents/PlugIns/WeatherWidget.appex/Contents/MacOS/WeatherWidget",
     "ssh": "/usr/bin/ssh",
-    "Mail": "/System/Applications/Mail.app/Contents/MacOS/Mail",
     "WhatsApp": "/Applications/WhatsApp.app/Contents/MacOS/WhatsApp",
     "AmneziaVP": "/Applications/AmneziaVPN.app/Contents/MacOS/AmneziaVPN"
   },

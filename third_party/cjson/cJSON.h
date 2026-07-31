@@ -11,6 +11,7 @@ extern "C" {
 #define cJSON_String 8
 #define cJSON_Array 16
 #define cJSON_Object 32
+#define cJSON_Number 64
 
 typedef struct cJSON {
   struct cJSON *next;
@@ -33,6 +34,7 @@ cJSON *cJSON_GetArrayItem(const cJSON *array, int index);
 #define cJSON_IsString(item) ((item) && (item)->type == cJSON_String && (item)->valuestring)
 #define cJSON_IsArray(item) ((item) && (item)->type == cJSON_Array)
 #define cJSON_IsObject(item) ((item) && (item)->type == cJSON_Object)
+#define cJSON_IsNumber(item) ((item) && (item)->type == cJSON_Number && (item)->valuestring)
 #define cJSON_ArrayForEach(element, array) \
   for ((element) = (array) ? (array)->child : 0; (element); (element) = (element)->next)
 

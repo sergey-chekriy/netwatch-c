@@ -1,73 +1,61 @@
-#include "allow.h"
-#include "config.h"
-#include "logging.h"
-#include "process.h"
-#include "strlist.h"
-#include "util.h"
-#include "wifi.h"
+#include "audit.h"
+#include "config_check.h"
+#include "config_convert.h"
+#include "monitor.h"
+#include "status.h"
+#include "why.h"
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
 
-static char *join_suspicious(StrList *items){
-  size_t n = 1;
-  for (size_t i = 0; i < items->len; i++) n += strlen(items->items[i]) + 1;
-  char *out = calloc(1, n); if (!out) return NULL;
-  for (size_t i = 0; i < items->len; i++){
-    strcat(out, items->items[i]);
-    if (i + 1 < items->len) strcat(out, "\n");
-  }
-  return out;
+#define DEFAULT_CONFIG_PATH "./netwatch.config.json"
+
+static void print_usage(const char *argv0){
+  fprintf(stderr, "Usage: %s [config.json]\n       %s --dry-run [config.json]\n       %s --stats [config.json]\n       %s --audit [seconds]\n       %s --status\n       %s --convert-config <config.json>\n       %s --check-config <config.json>\n       %s --why <executable-path>\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
-static void print_ok(void){
-  time_t now = time(NULL);
-  struct tm tm_utc;
-#if defined(_WIN32)
-  gmtime_s(&tm_utc, &now);
-#else
-  gmtime_r(&now, &tm_utc);
-#endif
-  char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
-  printf("[%s] OK\n", ts);
-}
-
-static int run(const char *cfg_path){
-  char err[512] = {0};
-  Config cfg = {0};
-  if (!config_load(&cfg, cfg_path, err, sizeof(err))){ fprintf(stderr, "ERROR: %s\n", err); return 1; }
-
-  StrList connections = {0}, suspicious = {0};
-  PathCache cache = {0};
-  int rc = 0;
-  if (!collect_connections(&connections, err, sizeof(err))){ fprintf(stderr, "ERROR: %s\n", err); rc = 1; goto done; }
-
-  for (size_t i = 0; i < connections.len; i++){
-    if (connection_allowed(connections.items[i], &cfg, &cache)) continue;
-    char *desc = describe_connection(connections.items[i], &cache);
-    if (!desc || !strlist_push(&suspicious, desc)){ free(desc); fprintf(stderr, "ERROR: out of memory\n"); rc = 1; goto done; }
-    free(desc);
-  }
-
-  if (suspicious.len){
-    char *reason = join_suspicious(&suspicious);
-    if (!reason){ fprintf(stderr, "ERROR: out of memory\n"); rc = 1; goto done; }
-    if (!disable_wifi_if_needed(&cfg, reason, isatty(STDOUT_FILENO), err, sizeof(err))){
-      fprintf(stderr, "ERROR: %s\n", err); rc = 1;
-    }
-    free(reason);
-  } else if (isatty(STDOUT_FILENO)) print_ok();
-
-done:
-  path_cache_free(&cache);
-  strlist_free(&connections);
-  strlist_free(&suspicious);
-  config_free(&cfg);
-  return rc;
+static int parse_duration(const char *text, int *out){
+  errno = 0;
+  char *end = NULL;
+  long value = strtol(text, &end, 10);
+  if (errno || !end || *end || value <= 0 || value > INT_MAX) return 0;
+  *out = (int)value; return 1;
 }
 
 int main(int argc, char **argv){
-  return run(argc > 1 ? argv[1] : "./netwatch.config.json");
+  if (argc > 1 && !strcmp(argv[1], "--convert-config")){
+    if (argc != 3){ print_usage(argv[0]); return 1; }
+    return config_convert_in_place(argv[2]);
+  }
+  if (argc > 1 && !strcmp(argv[1], "--check-config")){
+    if (argc != 3){ print_usage(argv[0]); return 1; }
+    return config_check_file(argv[2]);
+  }
+  if (argc > 1 && !strcmp(argv[1], "--why")){
+    if (argc != 3){ print_usage(argv[0]); return 1; }
+    return why_command(DEFAULT_CONFIG_PATH, argv[2]);
+  }
+  if (argc > 1 && !strcmp(argv[1], "--audit")){
+    int duration_seconds = 0;
+    if (argc > 3 || (argc == 3 && !parse_duration(argv[2], &duration_seconds))){ print_usage(argv[0]); return 1; }
+    return audit_run(DEFAULT_CONFIG_PATH, duration_seconds);
+  }
+  if (argc > 1 && !strcmp(argv[1], "--status")){
+    if (argc != 2){ print_usage(argv[0]); return 1; }
+    return status_command();
+  }
+  if (argc > 1 && !strcmp(argv[1], "--stats")){
+    if (argc > 3){ print_usage(argv[0]); return 1; }
+    MonitorStats stats = {0};
+    int rc = monitor_run_with_stats(argc == 3 ? argv[2] : DEFAULT_CONFIG_PATH, false, &stats, netwatch_platform_default());
+    if (stats.started_at) monitor_stats_print(&stats);
+    return rc;
+  }
+  if (argc > 1 && !strcmp(argv[1], "--dry-run")){
+    if (argc > 3){ print_usage(argv[0]); return 1; }
+    return monitor_run_with_options(argc == 3 ? argv[2] : DEFAULT_CONFIG_PATH, true, netwatch_platform_default());
+  }
+  return monitor_run(argc > 1 ? argv[1] : DEFAULT_CONFIG_PATH);
 }

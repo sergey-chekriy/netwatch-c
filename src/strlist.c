@@ -33,7 +33,11 @@ static int contains_ci(const char *s, const char *needle){
   return 0;
 }
 
+const char *strlist_find_contains_ci(const StrList *list, const char *text){
+  for (size_t i = 0; list && i < list->len; i++) if (contains_ci(text, list->items[i])) return list->items[i];
+  return NULL;
+}
+
 int strlist_has_contains_ci(const StrList *list, const char *text){
-  for (size_t i = 0; list && i < list->len; i++) if (contains_ci(text, list->items[i])) return 1;
-  return 0;
+  return strlist_find_contains_ci(list, text) != NULL;
 }

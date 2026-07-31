@@ -30,11 +30,12 @@ char *default_log_path(void){
   return out;
 }
 
-int log_message(const char *log_path, const char *msg, char *err, size_t err_len){
+int log_message_with_platform(const char *log_path, const char *msg, const NetwatchPlatform *platform, char *err, size_t err_len){
   if (!mkdir_p_for_file(log_path)){ set_error(err, err_len, "failed to create log directory"); return 0; }
   FILE *f = fopen(log_path, "a");
   if (!f){ set_error(err, err_len, "failed to open log %s", log_path); return 0; }
-  time_t now = time(NULL);
+  platform = netwatch_platform_or_default(platform);
+  time_t now = platform->now ? platform->now(platform) : time(NULL);
   struct tm tm_utc;
 #if defined(_WIN32)
   gmtime_s(&tm_utc, &now);
@@ -44,4 +45,8 @@ int log_message(const char *log_path, const char *msg, char *err, size_t err_len
   char ts[32]; strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
   fprintf(f, "[%s] %s\n", ts, msg);
   fclose(f); return 1;
+}
+
+int log_message(const char *log_path, const char *msg, char *err, size_t err_len){
+  return log_message_with_platform(log_path, msg, netwatch_platform_default(), err, err_len);
 }

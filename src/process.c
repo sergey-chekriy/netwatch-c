@@ -3,10 +3,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#ifdef __APPLE__
-#include <libproc.h>
-#endif
 
 void path_cache_free(PathCache *cache){
   if (!cache) return;
@@ -29,23 +25,6 @@ static int path_cache_put(PathCache *cache, int pid, const char *path){
   cache->items[cache->len].pid = pid;
   cache->items[cache->len].path = xstrdup(path ? path : "unknown");
   return cache->items[cache->len].path ? (++cache->len, 1) : 0;
-}
-
-static int bad_path_candidate(const char *p){
-  static const char *bad[] = { ".strings", ".stringsdict", ".loctable", ".car", ".dat", ".db", ".sqlite", ".sqlite-shm", ".plist", ".png", ".jpg", ".jpeg", ".icns", ".nib", ".ttf", ".otf", ".dylib" };
-  size_t len = strlen(p);
-  for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++){
-    size_t n = strlen(bad[i]);
-    if (len >= n && !strcasecmp(p + len - n, bad[i])) return 1;
-  }
-  return 0;
-}
-
-static int good_path_candidate(const char *p){
-  if (!p || bad_path_candidate(p)) return 0;
-  static const char *prefixes[] = { "/Applications/", "/System/Applications/", "/System/Library/", "/System/Volumes/Preboot/Cryptexes/App/", "/usr/bin/", "/usr/sbin/", "/usr/libexec/", "/bin/", "/sbin/", "/opt/homebrew/" };
-  for (size_t i = 0; i < sizeof(prefixes) / sizeof(*prefixes); i++) if (!strncmp(p, prefixes[i], strlen(prefixes[i]))) return 1;
-  return 0;
 }
 
 const char *process_name_of(const char *line){
@@ -74,63 +53,24 @@ char *remote_of(const char *line){
   memcpy(out, arrow, (size_t)(end - arrow)); out[end - arrow] = 0; return out;
 }
 
-static char *proc_pid_path(int pid){
-#ifdef __APPLE__
-  char buf[PROC_PIDPATHINFO_MAXSIZE];
-  int len = proc_pidpath(pid, buf, sizeof(buf));
-  return len > 0 ? xstrdup(buf) : NULL;
-#else
-  (void)pid; return NULL;
-#endif
-}
-
-static void add_lsof_candidate(StrList *paths, const char *line){
-  if (line && line[0] == 'n' && good_path_candidate(line + 1)) strlist_push(paths, line + 1);
-}
-
-static char *lsof_executable_path(int pid, const char *proc_name){
-  char cmd[128]; snprintf(cmd, sizeof(cmd), "lsof -a -p %d -d txt -Fn 2>/dev/null", pid);
-  FILE *pipe = popen(cmd, "r"); if (!pipe) return NULL;
-  StrList paths = {0};
-  char *line = NULL; size_t cap = 0;
-  while (getline(&line, &cap, pipe) != -1){
-    size_t n = strlen(line); if (n && line[n - 1] == '\n') line[n - 1] = 0;
-    add_lsof_candidate(&paths, line);
-  }
-  free(line); pclose(pipe);
-
-  char *app = NULL, *system = NULL, *first = NULL;
-  for (size_t i = 0; i < paths.len; i++){
-    const char *base = strrchr(paths.items[i], '/'); base = base ? base + 1 : paths.items[i];
-    if (!strncmp(base, proc_name, strlen(proc_name))){ char *out = xstrdup(paths.items[i]); strlist_free(&paths); return out; }
-    if (!app && strstr(paths.items[i], ".app/Contents/")) app = paths.items[i];
-    if (!system && (!strncmp(paths.items[i], "/System/", 8) || !strncmp(paths.items[i], "/usr/", 5) || !strncmp(paths.items[i], "/bin/", 5) || !strncmp(paths.items[i], "/sbin/", 6))) system = paths.items[i];
-    if (!first) first = paths.items[i];
-  }
-  char *out = xstrdup(app ? app : system ? system : first ? first : "unknown");
-  strlist_free(&paths); return out;
-}
-
-char *process_path_cached(PathCache *cache, int pid, const char *proc_name){
+char *process_path_cached_with_platform(PathCache *cache, int pid, const char *proc_name, const NetwatchPlatform *platform){
   char *cached = path_cache_get(cache, pid); if (cached) return cached;
-  char *path = proc_pid_path(pid);
-  if (!path) path = lsof_executable_path(pid, proc_name);
+  platform = netwatch_platform_or_default(platform);
+  char *path = platform->process_path(platform, pid, proc_name);
   if (!path) path = xstrdup("unknown");
   path_cache_put(cache, pid, path);
   return path;
 }
 
+char *process_path_cached(PathCache *cache, int pid, const char *proc_name){
+  return process_path_cached_with_platform(cache, pid, proc_name, netwatch_platform_default());
+}
+
+int collect_connections_with_platform(StrList *connections, const NetwatchPlatform *platform, char *err, size_t err_len){
+  platform = netwatch_platform_or_default(platform);
+  return platform->collect_connections(platform, connections, err, err_len);
+}
+
 int collect_connections(StrList *connections, char *err, size_t err_len){
-  FILE *pipe = popen("lsof -i -n -P", "r");
-  if (!pipe){ set_error(err, err_len, "failed to run lsof"); return 0; }
-  char *line = NULL; size_t cap = 0;
-  while (getline(&line, &cap, pipe) != -1){
-    if (!strstr(line, "ESTABLISHED") && !strstr(line, "LISTEN")) continue;
-    size_t n = strlen(line); if (n && line[n - 1] == '\n') line[n - 1] = 0;
-    if (!strlist_push(connections, line)){ free(line); pclose(pipe); set_error(err, err_len, "out of memory collecting connections"); return 0; }
-  }
-  free(line);
-  int rc = pclose(pipe);
-  if (rc != 0){ set_error(err, err_len, "lsof exited with status %d", rc); return 0; }
-  return 1;
+  return collect_connections_with_platform(connections, netwatch_platform_default(), err, err_len);
 }

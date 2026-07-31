@@ -1,23 +1,30 @@
 #ifndef NETWATCH_CONFIG_H
 #define NETWATCH_CONFIG_H
 
+#include "platform.h"
 #include "strlist.h"
 #include <stdbool.h>
 #include <stddef.h>
+
+#define NETWATCH_CONFIG_VERSION 2
 
 typedef struct { char *process; StrList paths; } ProcessRule;
 typedef struct { ProcessRule *items; size_t len; size_t cap; } ProcessRules;
 
 typedef struct {
   bool dry_run;
+  bool allow_apple_system_components;
   char *interface;
   char *log_path;
   StrList deny_patterns;
   StrList allow_remote_hosts;
   ProcessRules allow_processes;
+  TrustedPublisherRules trusted_publishers;
 } Config;
 
 int config_load(Config *cfg, const char *path, char *err, size_t err_len);
+int config_load_with_platform(Config *cfg, const char *path, const NetwatchPlatform *platform, char *err, size_t err_len);
+int config_parse_text(Config *cfg, const char *text, const char *source, char *err, size_t err_len);
 void config_free(Config *cfg);
 
 #endif
