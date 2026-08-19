@@ -33,6 +33,8 @@ The program must remain:
 ├── examples/
 │   └── netwatch.config.example.json
 ├── include/
+├── macos/
+│   └── NetwatchConfigurator/
 ├── scripts/
 ├── src/
 └── third_party/
@@ -56,6 +58,7 @@ Existing modules:
 - `status` - launchd/runtime/config status command;
 - `status_snapshot` - daemon status JSON for menu bar integration;
 - `packaging/menu-bar` - native AppKit status indicator with a dry-run config toggle;
+- `macos/NetwatchConfigurator` - optional SwiftUI configurator that calls netwatch CLI backend commands;
 - `platform` - OS and filesystem boundary used by production code and tests;
 - `logging` - log output;
 - `wifi` - Wi-Fi disable functionality;
@@ -100,6 +103,10 @@ An explicitly denied process must never be allowed because it has an Apple signa
 
 If an executable path matches a trusted publisher rule and identity verification fails, that
 failure is terminal for the executable in that policy evaluation.
+
+`allowProcesses` remains the explicit path-only allow layer for legacy/manual exceptions,
+optional local tools, and exact system executables outside automatic Apple-trust roots.
+It is intentionally weaker than `trustedPublishers` because it does not verify signed identity.
 
 ## 5. Result types
 

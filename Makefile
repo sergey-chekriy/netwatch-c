@@ -1,6 +1,9 @@
 APP := netwatch
 STATUSBAR_APP := netwatch-statusbar
 STATUSBAR_SRC := packaging/menu-bar/NetwatchStatusBar.swift
+CONFIGURATOR_DIR := macos/NetwatchConfigurator
+CONFIGURATOR_APP := build/NetwatchConfigurator.app
+CONFIGURATOR_BIN := $(CONFIGURATOR_DIR)/.build/release/NetwatchConfigurator
 CC ?= cc
 SWIFTC ?= /usr/bin/swiftc
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -O2
@@ -13,7 +16,7 @@ TEST_APP := tests/netwatch_tests
 TEST_SRC := tests/netwatch_tests.c src/allow.c src/apple_trust.c src/app_discovery.c src/audit.c src/config.c src/config_backend.c src/config_check.c src/config_convert.c src/daemon.c src/logging.c src/monitor.c src/platform.c src/process.c src/status.c src/status_snapshot.c src/strlist.c src/trusted_publisher.c src/trusted_workspace.c src/util.c src/wifi.c src/why.c third_party/cjson/cJSON.c
 PREFIX ?= $(HOME)/.watch
 
-.PHONY: all clean install uninstall run test statusbar install-statusbar
+.PHONY: all clean install uninstall run test statusbar install-statusbar configurator configurator-test
 
 all: $(APP)
 
@@ -40,6 +43,17 @@ install-statusbar: statusbar
 	cp $(STATUSBAR_APP) "$(PREFIX)/$(STATUSBAR_APP)"
 	chmod +x "$(PREFIX)/$(STATUSBAR_APP)"
 
+configurator: $(APP)
+	swift build --package-path "$(CONFIGURATOR_DIR)" -c release --product NetwatchConfigurator
+	rm -rf "$(CONFIGURATOR_APP)"
+	mkdir -p "$(CONFIGURATOR_APP)/Contents/MacOS" "$(CONFIGURATOR_APP)/Contents/Resources"
+	cp "$(CONFIGURATOR_BIN)" "$(CONFIGURATOR_APP)/Contents/MacOS/NetwatchConfigurator"
+	cp "$(CONFIGURATOR_DIR)/NetwatchConfigurator/Resources/Info.plist" "$(CONFIGURATOR_APP)/Contents/Info.plist"
+	cp "$(APP)" "$(CONFIGURATOR_APP)/Contents/Resources/netwatch"
+
+configurator-test:
+	swift run --package-path "$(CONFIGURATOR_DIR)" NetwatchConfiguratorSelfTest
+
 uninstall:
 	rm -f "$(PREFIX)/$(APP)"
 
@@ -51,3 +65,4 @@ test: $(APP) $(TEST_APP)
 
 clean:
 	rm -f $(APP) $(STATUSBAR_APP) $(OBJ) $(TEST_APP)
+	rm -rf "$(CONFIGURATOR_APP)"

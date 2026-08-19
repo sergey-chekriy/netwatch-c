@@ -18,7 +18,10 @@
 
 static void print_usage(const char *argv0){
   fprintf(stderr, "Usage: %s [config.json]\n       %s --once --config <config.json>\n       %s --daemon --config <config.json>\n       %s --dry-run [config.json]\n       %s --stats [config.json]\n       %s --audit [seconds]\n       %s --status\n       %s --status-json\n       %s --convert-config <config.json>\n       %s --check-config <config.json>\n       %s --why <pid-or-executable-path>\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
-  fprintf(stderr, "       %s --discover-apps --json\n       %s --config-show --config <config.json>\n       %s --config-set-dry-run true|false --config <config.json>\n       %s --config-set-poll-interval <seconds> --config <config.json>\n       %s --config-add-trusted-publisher <name> --path <executable-path> --team-id <team-id> --signing-identifier <identifier> --config <config.json>\n       %s --config-remove-trusted-publisher <name> --config <config.json>\n       %s --config-add-trusted-workspace <name> --root <folder-path> --interpreter <executable-path> --config <config.json>\n       %s --config-remove-trusted-workspace <name> --config <config.json>\n       %s --reload-daemon\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+  fprintf(stderr, "       %s --discover-apps --json\n       %s --config-show --config <config.json>\n       %s --config-set-dry-run true|false --config <config.json>\n       %s --config-set-poll-interval <seconds> --config <config.json>\n       %s --config-add-trusted-publisher <name> --path <executable-path> --team-id <team-id> --signing-identifier <identifier> --config <config.json>\n       %s --config-set-trusted-publisher <old-name> --name <new-name> --path <path> [--path <path> ...] --team-id <team-id> --signing-identifier <identifier> --config <config.json>\n       %s --config-remove-trusted-publisher <name> --config <config.json>\n       %s --config-add-trusted-workspace <name> --root <folder-path> --interpreter <executable-path> --config <config.json>\n       %s --config-set-trusted-workspace <old-name> --name <new-name> --root <path> [--root <path> ...] --interpreter <path> [--interpreter <path> ...] --allow-subdirectories true|false --allow-by-cwd-only true|false --config <config.json>\n       %s --config-remove-trusted-workspace <name> --config <config.json>\n       %s --reload-daemon\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+  fprintf(stderr, "       %s --config-set-apple-system-trust true|false --config <config.json>\n       %s --config-set-interface <name-or-empty> --config <config.json>\n       %s --config-set-log-path <path-or-empty> --config <config.json>\n", argv0, argv0, argv0);
+  fprintf(stderr, "       %s --config-set-daemon-reload-on-sighup true|false --config <config.json>\n       %s --config-set-daemon-exit-on-config-error true|false --config <config.json>\n       %s --config-set-deny-patterns [--value <pattern> ...] --config <config.json>\n       %s --config-set-allow-remote-hosts [--value <prefix> ...] --config <config.json>\n", argv0, argv0, argv0, argv0);
+  fprintf(stderr, "       %s --config-add-allow-process <name> --path <path-or-prefix*> --config <config.json>\n       %s --config-set-allow-process <old-name> --name <new-name> --path <path-or-prefix*> [--path <path-or-prefix*> ...] --config <config.json>\n       %s --config-remove-allow-process <name> --config <config.json>\n", argv0, argv0, argv0);
 }
 
 static int parse_duration(const char *text, int *out){
@@ -33,6 +36,106 @@ static int parse_bool_arg(const char *text, int *out){
   if (!strcmp(text, "true")){ *out = 1; return 1; }
   if (!strcmp(text, "false")){ *out = 0; return 1; }
   return 0;
+}
+
+static int set_allow_process_command(int argc, char **argv){
+  if (argc < 9 || strcmp(argv[3], "--name")) return 2;
+  const char **paths = calloc((size_t)argc, sizeof(*paths));
+  if (!paths){ fprintf(stderr, "ERROR: out of memory\n"); return 1; }
+  const char *config_path = NULL;
+  size_t path_count = 0;
+  int rc = 2;
+  for (int i = 5; i < argc;){
+    if (!strcmp(argv[i], "--path") && i + 1 < argc){
+      paths[path_count++] = argv[i + 1];
+      i += 2;
+    } else if (!strcmp(argv[i], "--config") && i + 2 == argc){
+      config_path = argv[i + 1];
+      i += 2;
+    } else {
+      goto done;
+    }
+  }
+  if (config_path && path_count > 0){
+    rc = config_backend_set_allow_process(config_path, argv[2], argv[4], paths, path_count, netwatch_platform_default());
+  }
+done:
+  free(paths);
+  return rc;
+}
+
+static int set_string_array_command(int argc, char **argv, int remote_hosts){
+  if (argc < 4) return 2;
+  const char **values = calloc((size_t)argc, sizeof(*values));
+  if (!values){ fprintf(stderr, "ERROR: out of memory\n"); return 1; }
+  const char *config_path = NULL;
+  size_t value_count = 0;
+  int rc = 2;
+  for (int i = 2; i < argc;){
+    if (!strcmp(argv[i], "--value") && i + 1 < argc){
+      values[value_count++] = argv[i + 1];
+      i += 2;
+    } else if (!strcmp(argv[i], "--config") && i + 2 == argc){
+      config_path = argv[i + 1];
+      i += 2;
+    } else {
+      goto done;
+    }
+  }
+  if (config_path){
+    rc = remote_hosts
+      ? config_backend_set_allow_remote_hosts(config_path, values, value_count, netwatch_platform_default())
+      : config_backend_set_deny_patterns(config_path, values, value_count, netwatch_platform_default());
+  }
+done:
+  free(values);
+  return rc;
+}
+
+static int set_trusted_publisher_command(int argc, char **argv){
+  if (argc < 13 || strcmp(argv[3], "--name")) return 2;
+  const char **paths = calloc((size_t)argc, sizeof(*paths));
+  if (!paths){ fprintf(stderr, "ERROR: out of memory\n"); return 1; }
+  const char *team_id = NULL, *signing_identifier = NULL, *config_path = NULL;
+  size_t path_count = 0;
+  int rc = 2;
+  for (int i = 5; i < argc;){
+    if (!strcmp(argv[i], "--path") && i + 1 < argc){ paths[path_count++] = argv[i + 1]; i += 2; }
+    else if (!strcmp(argv[i], "--team-id") && i + 1 < argc){ team_id = argv[i + 1]; i += 2; }
+    else if (!strcmp(argv[i], "--signing-identifier") && i + 1 < argc){ signing_identifier = argv[i + 1]; i += 2; }
+    else if (!strcmp(argv[i], "--config") && i + 2 == argc){ config_path = argv[i + 1]; i += 2; }
+    else goto done;
+  }
+  if (config_path && team_id && signing_identifier && path_count > 0){
+    rc = config_backend_set_trusted_publisher(config_path, argv[2], argv[4], paths, path_count, team_id, signing_identifier, netwatch_platform_default());
+  }
+done:
+  free(paths);
+  return rc;
+}
+
+static int set_trusted_workspace_command(int argc, char **argv){
+  if (argc < 15 || strcmp(argv[3], "--name")) return 2;
+  const char **roots = calloc((size_t)argc, sizeof(*roots));
+  const char **interpreters = calloc((size_t)argc, sizeof(*interpreters));
+  if (!roots || !interpreters){ free(roots); free(interpreters); fprintf(stderr, "ERROR: out of memory\n"); return 1; }
+  const char *config_path = NULL;
+  size_t root_count = 0, interpreter_count = 0;
+  int allow_subdirectories = -1, allow_by_cwd_only = -1, rc = 2;
+  for (int i = 5; i < argc;){
+    if (!strcmp(argv[i], "--root") && i + 1 < argc){ roots[root_count++] = argv[i + 1]; i += 2; }
+    else if (!strcmp(argv[i], "--interpreter") && i + 1 < argc){ interpreters[interpreter_count++] = argv[i + 1]; i += 2; }
+    else if (!strcmp(argv[i], "--allow-subdirectories") && i + 1 < argc && parse_bool_arg(argv[i + 1], &allow_subdirectories)){ i += 2; }
+    else if (!strcmp(argv[i], "--allow-by-cwd-only") && i + 1 < argc && parse_bool_arg(argv[i + 1], &allow_by_cwd_only)){ i += 2; }
+    else if (!strcmp(argv[i], "--config") && i + 2 == argc){ config_path = argv[i + 1]; i += 2; }
+    else goto done;
+  }
+  if (config_path && root_count > 0 && interpreter_count > 0 && allow_subdirectories >= 0 && allow_by_cwd_only >= 0){
+    rc = config_backend_set_trusted_workspace(config_path, argv[2], argv[4], roots, root_count, interpreters, interpreter_count, allow_subdirectories, allow_by_cwd_only, netwatch_platform_default());
+  }
+done:
+  free(roots); free(interpreters);
+  return rc;
 }
 
 int main(int argc, char **argv){
@@ -69,14 +172,52 @@ int main(int argc, char **argv){
     if (argc != 5 || !parse_bool_arg(argv[2], &value) || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
     return config_backend_set_dry_run(argv[4], value, netwatch_platform_default());
   }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-apple-system-trust")){
+    int value = 0;
+    if (argc != 5 || !parse_bool_arg(argv[2], &value) || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
+    return config_backend_set_apple_system_trust(argv[4], value, netwatch_platform_default());
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-interface")){
+    if (argc != 5 || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
+    return config_backend_set_interface(argv[4], argv[2], netwatch_platform_default());
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-log-path")){
+    if (argc != 5 || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
+    return config_backend_set_log_path(argv[4], argv[2], netwatch_platform_default());
+  }
   if (argc > 1 && !strcmp(argv[1], "--config-set-poll-interval")){
     int seconds = 0;
     if (argc != 5 || !parse_duration(argv[2], &seconds) || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
     return config_backend_set_poll_interval(argv[4], seconds, netwatch_platform_default());
   }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-daemon-reload-on-sighup")){
+    int value = 0;
+    if (argc != 5 || !parse_bool_arg(argv[2], &value) || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
+    return config_backend_set_daemon_reload_on_sighup(argv[4], value, netwatch_platform_default());
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-daemon-exit-on-config-error")){
+    int value = 0;
+    if (argc != 5 || !parse_bool_arg(argv[2], &value) || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
+    return config_backend_set_daemon_exit_on_config_error(argv[4], value, netwatch_platform_default());
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-deny-patterns")){
+    int rc = set_string_array_command(argc, argv, 0);
+    if (rc == 2){ print_usage(argv[0]); return 1; }
+    return rc;
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-allow-remote-hosts")){
+    int rc = set_string_array_command(argc, argv, 1);
+    if (rc == 2){ print_usage(argv[0]); return 1; }
+    return rc;
+  }
   if (argc > 1 && !strcmp(argv[1], "--config-add-trusted-publisher")){
     if (argc != 11 || strcmp(argv[3], "--path") || strcmp(argv[5], "--team-id") || strcmp(argv[7], "--signing-identifier") || strcmp(argv[9], "--config")){ print_usage(argv[0]); return 1; }
     return config_backend_add_trusted_publisher(argv[10], argv[2], argv[4], argv[6], argv[8], netwatch_platform_default());
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-trusted-publisher")){
+    int rc = set_trusted_publisher_command(argc, argv);
+    if (rc == 2){ print_usage(argv[0]); return 1; }
+    return rc;
   }
   if (argc > 1 && !strcmp(argv[1], "--config-remove-trusted-publisher")){
     if (argc != 5 || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
@@ -86,9 +227,27 @@ int main(int argc, char **argv){
     if (argc != 9 || strcmp(argv[3], "--root") || strcmp(argv[5], "--interpreter") || strcmp(argv[7], "--config")){ print_usage(argv[0]); return 1; }
     return config_backend_add_trusted_workspace(argv[8], argv[2], argv[4], argv[6], netwatch_platform_default());
   }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-trusted-workspace")){
+    int rc = set_trusted_workspace_command(argc, argv);
+    if (rc == 2){ print_usage(argv[0]); return 1; }
+    return rc;
+  }
   if (argc > 1 && !strcmp(argv[1], "--config-remove-trusted-workspace")){
     if (argc != 5 || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
     return config_backend_remove_trusted_workspace(argv[4], argv[2], netwatch_platform_default());
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-add-allow-process")){
+    if (argc != 7 || strcmp(argv[3], "--path") || strcmp(argv[5], "--config")){ print_usage(argv[0]); return 1; }
+    return config_backend_add_allow_process(argv[6], argv[2], argv[4], netwatch_platform_default());
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-allow-process")){
+    int rc = set_allow_process_command(argc, argv);
+    if (rc == 2){ print_usage(argv[0]); return 1; }
+    return rc;
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-remove-allow-process")){
+    if (argc != 5 || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
+    return config_backend_remove_allow_process(argv[4], argv[2], netwatch_platform_default());
   }
   if (argc > 1 && !strcmp(argv[1], "--reload-daemon")){
     if (argc != 2){ print_usage(argv[0]); return 1; }

@@ -1,9 +1,25 @@
+# Local prompts / private planning files
 prompts
-netwatch
-netwatch-statusbar
+roadmap.md
+push.sh
+
+# Build outputs and binaries
+/netwatch
+/netwatch-statusbar
+/tests/netwatch_tests
+/build/
+*.app/
 *.o
 *.dSYM/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+
+# SwiftPM
+/macos/NetwatchConfigurator/.build/
+.swiftpm/
+
+# Local editor/system files
 .DS_Store
 compile_commands.json
-push.sh
-roadmap.md

@@ -1264,10 +1264,64 @@ static int call_set_dry_run(void *ctx){
   return config_backend_set_dry_run(c->path, c->value, c->platform);
 }
 
+static int call_set_apple_trust(void *ctx){
+  DryRunCtx *c = ctx;
+  return config_backend_set_apple_system_trust(c->path, c->value, c->platform);
+}
+
 typedef struct { const char *path; int seconds; const NetwatchPlatform *platform; } PollCtx;
 static int call_set_poll(void *ctx){
   PollCtx *c = ctx;
   return config_backend_set_poll_interval(c->path, c->seconds, c->platform);
+}
+
+static int call_set_daemon_reload(void *ctx){
+  DryRunCtx *c = ctx;
+  return config_backend_set_daemon_reload_on_sighup(c->path, c->value, c->platform);
+}
+
+static int call_set_daemon_exit(void *ctx){
+  DryRunCtx *c = ctx;
+  return config_backend_set_daemon_exit_on_config_error(c->path, c->value, c->platform);
+}
+
+typedef struct { const char *path; const char *value; const NetwatchPlatform *platform; } StringCtx;
+static int call_set_interface(void *ctx){
+  StringCtx *c = ctx;
+  return config_backend_set_interface(c->path, c->value, c->platform);
+}
+
+static int call_set_log_path(void *ctx){
+  StringCtx *c = ctx;
+  return config_backend_set_log_path(c->path, c->value, c->platform);
+}
+
+typedef struct { const char *path; const char **values; size_t value_count; const NetwatchPlatform *platform; } StringArrayCtx;
+static int call_set_deny_patterns(void *ctx){
+  StringArrayCtx *c = ctx;
+  return config_backend_set_deny_patterns(c->path, c->values, c->value_count, c->platform);
+}
+
+static int call_set_allow_remote_hosts(void *ctx){
+  StringArrayCtx *c = ctx;
+  return config_backend_set_allow_remote_hosts(c->path, c->values, c->value_count, c->platform);
+}
+
+typedef struct { const char *config_path; const char *name; const char *path; const NetwatchPlatform *platform; } AllowProcessCtx;
+static int call_add_allow_process(void *ctx){
+  AllowProcessCtx *c = ctx;
+  return config_backend_add_allow_process(c->config_path, c->name, c->path, c->platform);
+}
+
+static int call_remove_allow_process(void *ctx){
+  AllowProcessCtx *c = ctx;
+  return config_backend_remove_allow_process(c->config_path, c->name, c->platform);
+}
+
+typedef struct { const char *config_path; const char *old_name; const char *new_name; const char **paths; size_t path_count; const NetwatchPlatform *platform; } SetAllowProcessCtx;
+static int call_set_allow_process(void *ctx){
+  SetAllowProcessCtx *c = ctx;
+  return config_backend_set_allow_process(c->config_path, c->old_name, c->new_name, c->paths, c->path_count, c->platform);
 }
 
 typedef struct {
@@ -1284,6 +1338,22 @@ static int call_add_publisher(void *ctx){
   return config_backend_add_trusted_publisher(c->config_path, c->name, c->path, c->team_id, c->signing_identifier, c->platform);
 }
 
+typedef struct {
+  const char *config_path;
+  const char *old_name;
+  const char *new_name;
+  const char **paths;
+  size_t path_count;
+  const char *team_id;
+  const char *signing_identifier;
+  const NetwatchPlatform *platform;
+} SetPublisherCtx;
+
+static int call_set_publisher(void *ctx){
+  SetPublisherCtx *c = ctx;
+  return config_backend_set_trusted_publisher(c->config_path, c->old_name, c->new_name, c->paths, c->path_count, c->team_id, c->signing_identifier, c->platform);
+}
+
 typedef struct { const char *config_path; const char *name; const NetwatchPlatform *platform; } RemoveCtx;
 static int call_remove_publisher(void *ctx){
   RemoveCtx *c = ctx;
@@ -1294,6 +1364,24 @@ typedef struct { const char *config_path; const char *name; const char *root; co
 static int call_add_workspace(void *ctx){
   WorkspaceCtx *c = ctx;
   return config_backend_add_trusted_workspace(c->config_path, c->name, c->root, c->interpreter, c->platform);
+}
+
+typedef struct {
+  const char *config_path;
+  const char *old_name;
+  const char *new_name;
+  const char **roots;
+  size_t root_count;
+  const char **interpreters;
+  size_t interpreter_count;
+  int allow_subdirectories;
+  int allow_by_cwd_only;
+  const NetwatchPlatform *platform;
+} SetWorkspaceCtx;
+
+static int call_set_workspace(void *ctx){
+  SetWorkspaceCtx *c = ctx;
+  return config_backend_set_trusted_workspace(c->config_path, c->old_name, c->new_name, c->roots, c->root_count, c->interpreters, c->interpreter_count, c->allow_subdirectories, c->allow_by_cwd_only, c->platform);
 }
 
 static int call_remove_workspace(void *ctx){
@@ -1355,11 +1443,17 @@ static void test_config_backend_editing(void){
   char *dir = temp_dir();
   char *config = join_path_dup(dir, "config.json");
   char *publisher_exe = join_path_dup(dir, "publisher");
+  char *publisher_helper = join_path_dup(dir, "publisher-helper");
   char *workspace_root = join_path_dup(dir, "workspace");
+  char *workspace_root_two = join_path_dup(dir, "workspace2");
   char *interpreter = join_path_dup(dir, "node");
+  char *interpreter_two = join_path_dup(dir, "python");
   mkdir_ok(workspace_root);
+  mkdir_ok(workspace_root_two);
   write_text_mode(publisher_exe, "x", 0700);
+  write_text_mode(publisher_helper, "x", 0700);
   write_text_mode(interpreter, "x", 0700);
+  write_text_mode(interpreter_two, "x", 0700);
   write_text_mode(config,
     "{\n"
     "  \"version\": 2,\n"
@@ -1417,6 +1511,122 @@ static void test_config_backend_editing(void){
   assert_contains(cap.err, "poll interval must be a positive integer");
   capture_free(&cap);
 
+  DryRunCtx apple = { config, 1, &platform };
+  cap = capture_call(call_set_apple_trust, &apple);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "allowAppleSystemComponents -> true");
+  text = must_read(config);
+  assert_contains(text, "\"allowAppleSystemComponents\": true");
+  free(text);
+  capture_free(&cap);
+
+  StringCtx string_edit = { config, "en0", &platform };
+  cap = capture_call(call_set_interface, &string_edit);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_contains(text, "\"interface\": \"en0\"");
+  free(text);
+  capture_free(&cap);
+
+  char *log_path = join_path_dup(dir, "netwatch.log");
+  string_edit.value = log_path;
+  cap = capture_call(call_set_log_path, &string_edit);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_contains(text, "\"logPath\":");
+  assert_contains(text, log_path);
+  free(text);
+  capture_free(&cap);
+
+  string_edit.value = "relative.log";
+  cap = capture_call(call_set_log_path, &string_edit);
+  assert(cap.rc != 0);
+  assert_contains(cap.err, "logPath must be an absolute path or empty");
+  capture_free(&cap);
+
+  DryRunCtx daemon_bool = { config, 0, &platform };
+  cap = capture_call(call_set_daemon_reload, &daemon_bool);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "daemon.reloadOnSighup -> false");
+  capture_free(&cap);
+  daemon_bool.value = 1;
+  cap = capture_call(call_set_daemon_exit, &daemon_bool);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "daemon.exitOnConfigError -> true");
+  capture_free(&cap);
+
+  const char *deny_values[] = { "bad.host", ":4444" };
+  StringArrayCtx array_edit = { config, deny_values, 2, &platform };
+  cap = capture_call(call_set_deny_patterns, &array_edit);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_contains(text, "\"denyPatterns\": [");
+  assert_contains(text, "\"bad.host\"");
+  free(text);
+  capture_free(&cap);
+
+  const char *remote_values[] = { "17.", "149.154." };
+  array_edit.values = remote_values;
+  array_edit.value_count = 2;
+  cap = capture_call(call_set_allow_remote_hosts, &array_edit);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_contains(text, "\"allowRemoteHosts\": [");
+  assert_contains(text, "\"149.154.\"");
+  free(text);
+  capture_free(&cap);
+
+  AllowProcessCtx allow = { config, "Local Tool", "/usr/local/bin/tool", &platform };
+  cap = capture_call(call_add_allow_process, &allow);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "allowProcesses.Local Tool added");
+  text = must_read(config);
+  assert_contains(text, "\"Local Tool\": \"/usr/local/bin/tool\"");
+  free(text);
+  capture_free(&cap);
+
+  allow.path = "/Applications/Tool.app/Contents/*";
+  cap = capture_call(call_add_allow_process, &allow);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_contains(text, "\"Local Tool\": [");
+  assert_contains(text, "\"/usr/local/bin/tool\"");
+  assert_contains(text, "\"/Applications/Tool.app/Contents/*\"");
+  free(text);
+  capture_free(&cap);
+
+  cap = capture_call(call_add_allow_process, &allow);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "Config is already up to date.");
+  capture_free(&cap);
+
+  const char *set_paths[] = { "/usr/bin/scp", "/Applications/Tool.app/Contents/*" };
+  SetAllowProcessCtx set_allow = { config, "Local Tool", "Remote Tools", set_paths, 2, &platform };
+  cap = capture_call(call_set_allow_process, &set_allow);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "allowProcesses.Remote Tools set");
+  text = must_read(config);
+  assert_not_contains(text, "\"Local Tool\"");
+  assert_contains(text, "\"Remote Tools\": [");
+  assert_contains(text, "\"/usr/bin/scp\"");
+  assert_contains(text, "\"/Applications/Tool.app/Contents/*\"");
+  free(text);
+  capture_free(&cap);
+
+  allow.path = "/Applications/*/bad";
+  cap = capture_call(call_add_allow_process, &allow);
+  assert(cap.rc != 0);
+  assert_contains(cap.err, "wildcard is supported only as a final *");
+  capture_free(&cap);
+
+  AllowProcessCtx remove_allow = { config, "Remote Tools", NULL, &platform };
+  cap = capture_call(call_remove_allow_process, &remove_allow);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_not_contains(text, "\"Remote Tools\"");
+  free(text);
+  capture_free(&cap);
+
   PublisherCtx pub = { config, "Alpha Publisher", publisher_exe, "TEAMID1234", "com.example.App", &platform };
   cap = capture_call(call_add_publisher, &pub);
   assert(cap.rc == 0);
@@ -1426,6 +1636,17 @@ static void test_config_backend_editing(void){
   assert_contains(text, publisher_exe);
   assert_contains(text, "\"teamId\": \"TEAMID1234\"");
   assert_contains(text, "\"signingIdentifier\": \"com.example.App\"");
+  free(text);
+  capture_free(&cap);
+
+  const char *publisher_paths[] = { publisher_exe, publisher_helper };
+  SetPublisherCtx set_pub = { config, "Alpha Publisher", "Alpha Publisher Edited", publisher_paths, 2, "TEAMID1234", "com.example.App", &platform };
+  cap = capture_call(call_set_publisher, &set_pub);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_not_contains(text, "\"Alpha Publisher\":");
+  assert_contains(text, "\"Alpha Publisher Edited\"");
+  assert_contains(text, publisher_helper);
   free(text);
   capture_free(&cap);
 
@@ -1455,7 +1676,7 @@ static void test_config_backend_editing(void){
   assert_contains(cap.err, "signing identifier mismatch");
   capture_free(&cap);
 
-  RemoveCtx remove = { config, "Alpha Publisher", &platform };
+  RemoveCtx remove = { config, "Alpha Publisher Edited", &platform };
   cap = capture_call(call_remove_publisher, &remove);
   assert(cap.rc == 0);
   text = must_read(config);
@@ -1471,6 +1692,21 @@ static void test_config_backend_editing(void){
   assert_contains(text, "\"Scripts\"");
   assert_contains(text, "\"allowSubdirectories\": true");
   assert_contains(text, "\"allowByCwdOnly\": false");
+  free(text);
+  capture_free(&cap);
+
+  const char *workspace_roots[] = { workspace_root, workspace_root_two };
+  const char *workspace_interpreters[] = { interpreter, interpreter_two };
+  SetWorkspaceCtx set_ws = { config, "Scripts", "Scripts Edited", workspace_roots, 2, workspace_interpreters, 2, 0, 1, &platform };
+  cap = capture_call(call_set_workspace, &set_ws);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_not_contains(text, "\"Scripts\":");
+  assert_contains(text, "\"Scripts Edited\"");
+  assert_contains(text, workspace_root_two);
+  assert_contains(text, interpreter_two);
+  assert_contains(text, "\"allowSubdirectories\": false");
+  assert_contains(text, "\"allowByCwdOnly\": true");
   free(text);
   capture_free(&cap);
 
@@ -1491,7 +1727,7 @@ static void test_config_backend_editing(void){
   assert_contains(cap.err, "interpreter must exist and be executable");
   capture_free(&cap);
 
-  RemoveCtx remove_ws = { config, "Scripts", &platform };
+  RemoveCtx remove_ws = { config, "Scripts Edited", &platform };
   cap = capture_call(call_remove_workspace, &remove_ws);
   assert(cap.rc == 0);
   text = must_read(config);
@@ -1500,10 +1736,10 @@ static void test_config_backend_editing(void){
   free(text);
   capture_free(&cap);
 
-  unlink(config); unlink(backup); unlink(publisher_exe); unlink(interpreter); unlink(not_exec);
-  rmdir(workspace_root); rmdir(dir);
-  free(config); free(backup); free(publisher_exe); free(workspace_root); free(interpreter);
-  free(missing_root); free(not_exec); free(dir);
+  unlink(config); unlink(backup); unlink(publisher_exe); unlink(publisher_helper); unlink(interpreter); unlink(interpreter_two); unlink(not_exec);
+  rmdir(workspace_root); rmdir(workspace_root_two); rmdir(dir);
+  free(config); free(backup); free(publisher_exe); free(publisher_helper); free(workspace_root); free(workspace_root_two); free(interpreter); free(interpreter_two);
+  free(log_path); free(missing_root); free(not_exec); free(dir);
 }
 
 static void test_config_backend_reload_daemon(void){

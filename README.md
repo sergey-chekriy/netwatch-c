@@ -78,6 +78,15 @@ make test
 
 The runtime OS operations are routed through a small platform layer so tests can fake `lsof`, executable path lookup, Apple signature verification, filesystem failures, timestamps, and Wi-Fi disable actions. Normal commands still use the production macOS implementations. Production command execution uses direct `posix_spawnp()` calls, not shell command strings.
 
+Build the optional macOS SwiftUI configurator:
+
+```bash
+make configurator
+make configurator-test
+```
+
+The app bundle is created at `build/NetwatchConfigurator.app`. It is a thin GUI over the netwatch CLI backend and does not implement policy decisions itself. See [docs/configurator.md](docs/configurator.md).
+
 ## Manual install
 
 Create the working directory:
@@ -439,12 +448,28 @@ Edit selected config fields:
 ./netwatch --config-set-dry-run true --config /path/to/netwatch.config.json
 ./netwatch --config-set-dry-run false --config /path/to/netwatch.config.json
 ./netwatch --config-set-poll-interval 300 --config /path/to/netwatch.config.json
+./netwatch --config-set-apple-system-trust true --config /path/to/netwatch.config.json
+./netwatch --config-set-interface "Wi-Fi" --config /path/to/netwatch.config.json
+./netwatch --config-set-log-path "/Users/serg/.watch/netwatch.log" --config /path/to/netwatch.config.json
+./netwatch --config-set-daemon-reload-on-sighup true --config /path/to/netwatch.config.json
+./netwatch --config-set-daemon-exit-on-config-error false --config /path/to/netwatch.config.json
+./netwatch --config-set-deny-patterns --value "bad-host" --value ":4444" --config /path/to/netwatch.config.json
+./netwatch --config-set-allow-remote-hosts --value "17." --value "149.154." --config /path/to/netwatch.config.json
 ```
+
+For `logPath`, pass an empty string to remove the field and use the default log location. For deny and remote-host lists, omit `--value` to write an empty array.
 
 Add or remove trusted publisher rules:
 
 ```bash
 ./netwatch --config-add-trusted-publisher "Google Chrome" \
+  --path "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --team-id "EXPECTED_TEAM_ID" \
+  --signing-identifier "com.google.Chrome" \
+  --config /path/to/netwatch.config.json
+
+./netwatch --config-set-trusted-publisher "Google Chrome" \
+  --name "Google Chrome" \
   --path "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --team-id "EXPECTED_TEAM_ID" \
   --signing-identifier "com.google.Chrome" \
@@ -464,11 +489,42 @@ Add or remove trusted workspace rules:
   --interpreter "/usr/local/bin/node" \
   --config /path/to/netwatch.config.json
 
+./netwatch --config-set-trusted-workspace "project scripts" \
+  --name "project scripts" \
+  --root "/Users/serg/project" \
+  --interpreter "/usr/local/bin/node" \
+  --allow-subdirectories true \
+  --allow-by-cwd-only false \
+  --config /path/to/netwatch.config.json
+
 ./netwatch --config-remove-trusted-workspace "project scripts" \
   --config /path/to/netwatch.config.json
 ```
 
-Workspace additions require an existing directory root and an existing executable interpreter. Added rules default to `allowSubdirectories=true` and `allowByCwdOnly=false`.
+Workspace additions require an existing directory root and an existing executable interpreter. The set command can rename a rule and edit roots, interpreters, `allowSubdirectories`, and `allowByCwdOnly`.
+
+Add or remove legacy path-only allow rules:
+
+```bash
+./netwatch --config-add-allow-process "ssh" \
+  --path "/usr/bin/ssh" \
+  --config /path/to/netwatch.config.json
+
+./netwatch --config-add-allow-process "Some App" \
+  --path "/Applications/Some App.app/Contents/*" \
+  --config /path/to/netwatch.config.json
+
+./netwatch --config-set-allow-process "ssh" \
+  --name "remote tools" \
+  --path "/usr/bin/ssh" \
+  --path "/usr/bin/scp" \
+  --config /path/to/netwatch.config.json
+
+./netwatch --config-remove-allow-process "Some App" \
+  --config /path/to/netwatch.config.json
+```
+
+Path-only rules preserve the existing `allowProcesses` semantics and are weaker than `trustedPublishers`: they do not verify Team ID or signing identifier. Use them for explicit legacy/manual rules, optional local tools such as `/usr/bin/ssh` or `/usr/bin/scp`, Apple executables outside automatic Apple roots, apps that cannot currently be verified as trusted publishers, or app helpers that are not yet modeled as trusted publisher paths. The configurator can add path-only rules from manual paths or from discovered `.app` bundles, and can edit existing rule names and paths without hand-editing JSON.
 
 Config editing commands validate the existing config, modify only the requested field, validate the updated config, create a backup, write a same-directory temporary file, flush it, atomically replace the original with `rename()`, and preserve unrelated fields. Output uses the same deterministic JSON formatting as config conversion. Repeated config backend edits use the first available backup name from `config.json.bak` through `config.json.bak.999`.
 
