@@ -7,6 +7,7 @@
 #include "daemon.h"
 #include "monitor.h"
 #include "status.h"
+#include "status_snapshot.h"
 #include "strlist.h"
 #include "util.h"
 #include "why.h"
@@ -143,6 +144,7 @@ typedef struct {
   int copy_calls;
   int fail_copy;
   int fail_wifi;
+  int fail_collect;
   const char *process_path;
   const char *process_cwd;
   const char **process_argv;
@@ -160,6 +162,8 @@ typedef struct {
   int launchd_calls;
   int launchd_loaded_result;
   int find_process_calls;
+  int write_temp_file_calls;
+  int not_scanned_status_after_scan;
   int read_file_calls;
   int daemon_stop_calls;
   int daemon_reload_calls;
@@ -202,9 +206,9 @@ static CodeSignatureIdentityResult fake_platform_identity(const NetwatchPlatform
 }
 
 static int fake_platform_collect(const NetwatchPlatform *platform, StrList *connections, char *err, size_t err_len){
-  (void)err; (void)err_len;
   FakePlatformState *state = platform->ctx;
   state->collect_calls++;
+  if (state->fail_collect){ set_error(err, err_len, "fake collect failure"); return 0; }
   if (state->connections){
     for (size_t i = 0; i < state->connection_count; i++) if (!strlist_push(connections, state->connections[i])) return 0;
     return 1;
@@ -267,6 +271,13 @@ static int fake_platform_copy_file(const NetwatchPlatform *platform, const char 
   return netwatch_platform_default()->copy_file(netwatch_platform_default(), src, dst, mode, err, err_len);
 }
 
+static int fake_platform_write_temp_file(const NetwatchPlatform *platform, const char *path, const char *text, mode_t mode, char *err, size_t err_len){
+  FakePlatformState *state = platform->ctx;
+  state->write_temp_file_calls++;
+  if (state->collect_calls > 0 && strstr(text, "\"lastScanResult\": \"not_scanned\"")) state->not_scanned_status_after_scan++;
+  return netwatch_platform_default()->write_temp_file(netwatch_platform_default(), path, text, mode, err, err_len);
+}
+
 static time_t fake_platform_now(const NetwatchPlatform *platform){
   FakePlatformState *state = platform->ctx;
   return state->now_value ? state->now_value : 1700000000;
@@ -318,6 +329,7 @@ static NetwatchPlatform fake_platform(FakePlatformState *state){
   NetwatchPlatform platform = *netwatch_platform_default();
   platform.ctx = state;
   platform.read_file = fake_platform_read_file;
+  platform.write_temp_file = fake_platform_write_temp_file;
   platform.apple_trust_check = fake_platform_apple;
   platform.collect_connections = fake_platform_collect;
   platform.process_path = fake_platform_process_path;
@@ -513,7 +525,7 @@ static Capture capture_monitor_stats(const char *path, MonitorStats *stats, cons
   return cap;
 }
 
-static Capture capture_daemon(const char *path, const NetwatchPlatform *platform){
+static Capture capture_daemon_status(const char *path, const char *status_path, const NetwatchPlatform *platform){
   char out_path[] = "/tmp/netwatch_daemon_out_XXXXXX";
   char err_path[] = "/tmp/netwatch_daemon_err_XXXXXX";
   int out_fd = mkstemp(out_path), err_fd = mkstemp(err_path);
@@ -524,7 +536,7 @@ static Capture capture_daemon(const char *path, const NetwatchPlatform *platform
   assert(saved_out >= 0 && saved_err >= 0);
   assert(dup2(out_fd, STDOUT_FILENO) >= 0);
   assert(dup2(err_fd, STDERR_FILENO) >= 0);
-  int rc = daemon_run_with_platform(path, platform);
+  int rc = daemon_run_with_status_path(path, status_path, platform);
   fflush(NULL);
   assert(dup2(saved_out, STDOUT_FILENO) >= 0);
   assert(dup2(saved_err, STDERR_FILENO) >= 0);
@@ -532,6 +544,16 @@ static Capture capture_daemon(const char *path, const NetwatchPlatform *platform
 
   Capture cap = { .rc = rc, .out = must_read(out_path), .err = must_read(err_path) };
   unlink(out_path); unlink(err_path);
+  return cap;
+}
+
+static Capture capture_daemon(const char *path, const NetwatchPlatform *platform){
+  char status_path[] = "/tmp/netwatch_status_json_XXXXXX";
+  int fd = mkstemp(status_path);
+  assert(fd >= 0);
+  close(fd); unlink(status_path);
+  Capture cap = capture_daemon_status(path, status_path, platform);
+  unlink(status_path);
   return cap;
 }
 
@@ -2262,6 +2284,7 @@ static void test_daemon_mode(void){
   assert(state.collect_calls == 2);
   assert(state.sleep_calls == 1);
   assert(state.slept_seconds == 7);
+  assert(state.not_scanned_status_after_scan == 0);
   capture_free(&cap);
   free(reload_a); free(reload_b);
 
@@ -2360,6 +2383,151 @@ static void test_daemon_lock_path_canonicalizes_config(void){
   free(absolute_lock); free(relative_lock);
   unlink(config); rmdir(dir);
   free(config); free(dir);
+}
+
+static void test_status_snapshot_json(void){
+  const time_t now = 1700000100;
+  Config cfg = { .dry_run = false, .daemon = { .poll_interval_seconds = 300 } };
+  MonitorScanOutcome outcome = { .last_scan_at = 1700000000 };
+  snprintf(outcome.last_scan_result, sizeof(outcome.last_scan_result), "ok");
+  NetwatchStatusSnapshot snapshot;
+  netwatch_status_snapshot_from_scan(&snapshot, "/tmp/netwatch.config.json", &cfg, &outcome, true, true);
+  assert(!strcmp(netwatch_status_level_at(&snapshot, now), "ok"));
+  assert(!strcmp(netwatch_status_level_at(&snapshot, 1700000401), "error"));
+  snapshot.daemon_running = false;
+  assert(!strcmp(netwatch_status_level_at(&snapshot, now), "ok"));
+  char *json = netwatch_status_snapshot_json_at(&snapshot, now);
+  assert(json);
+  assert_contains(json, "\"status\": \"ok\"");
+  assert_contains(json, "\"daemonRunning\": false");
+  assert_contains(json, "\"lastUnknownProcessSummary\": null");
+  assert_not_contains(json, "history");
+  free(json);
+
+  cfg.dry_run = true;
+  netwatch_status_snapshot_from_scan(&snapshot, "/tmp/netwatch.config.json", &cfg, &outcome, true, true);
+  assert(!strcmp(netwatch_status_level_at(&snapshot, now), "attention"));
+  json = netwatch_status_snapshot_json_at(&snapshot, now);
+  assert_contains(json, "\"status\": \"attention\"");
+  assert_contains(json, "\"dryRun\": true");
+  free(json);
+
+  outcome = (MonitorScanOutcome){ .last_scan_at = 1700000001, .unknown_count = 1, .would_disable_wifi = true, .has_last_unknown = true };
+  snprintf(outcome.last_scan_result, sizeof(outcome.last_scan_result), "unknown");
+  outcome.last_unknown = (MonitorUnknownSummary){ .pid = 42, .dry_run = true, .would_disable_wifi = true, .wifi_disabled = false };
+  snprintf(outcome.last_unknown.process_name, sizeof(outcome.last_unknown.process_name), "node");
+  snprintf(outcome.last_unknown.command_line, sizeof(outcome.last_unknown.command_line), "node script.js");
+  snprintf(outcome.last_unknown.executable_path, sizeof(outcome.last_unknown.executable_path), "/opt/node");
+  snprintf(outcome.last_unknown.cwd, sizeof(outcome.last_unknown.cwd), "/tmp/project");
+  snprintf(outcome.last_unknown.remote_endpoint, sizeof(outcome.last_unknown.remote_endpoint), "203.0.113.10:443");
+  snprintf(outcome.last_unknown.reason, sizeof(outcome.last_unknown.reason), "not present in allowlist");
+  cfg.dry_run = true;
+  netwatch_status_snapshot_from_scan(&snapshot, "/tmp/netwatch.config.json", &cfg, &outcome, true, true);
+  json = netwatch_status_snapshot_json_at(&snapshot, now);
+  assert_contains(json, "\"status\": \"error\"");
+  assert_contains(json, "\"unknownCount\": 1");
+  assert_contains(json, "\"wouldDisableWifi\": true");
+  assert_contains(json, "\"wifiDisabled\": false");
+  assert_contains(json, "\"processName\": \"node\"");
+  assert_not_contains(json, "environment");
+  free(json);
+
+  cfg.dry_run = false;
+  outcome.wifi_disabled = true;
+  outcome.last_unknown.dry_run = false;
+  outcome.last_unknown.wifi_disabled = true;
+  netwatch_status_snapshot_from_scan(&snapshot, "/tmp/netwatch.config.json", &cfg, &outcome, true, true);
+  json = netwatch_status_snapshot_json_at(&snapshot, now);
+  assert_contains(json, "\"status\": \"error\"");
+  assert_contains(json, "\"wifiDisabled\": true");
+  free(json);
+
+  outcome = (MonitorScanOutcome){ .last_scan_at = 1700000002 };
+  snprintf(outcome.last_scan_result, sizeof(outcome.last_scan_result), "error");
+  netwatch_status_snapshot_from_scan(&snapshot, "/tmp/netwatch.config.json", &cfg, &outcome, true, true);
+  json = netwatch_status_snapshot_json_at(&snapshot, now);
+  assert_contains(json, "\"status\": \"error\"");
+  free(json);
+
+  char *dir = temp_dir();
+  char *path = join_path_dup(dir, "status.json");
+  char err[256] = {0};
+  assert(netwatch_status_write(path, &snapshot, netwatch_platform_default(), err, sizeof(err)));
+  char *text = must_read(path);
+  assert_contains(text, "\"status\": \"error\"");
+  free(text);
+  char tmp[PATH_MAX];
+  snprintf(tmp, sizeof(tmp), "%s/.status.json.tmp.%ld.0", dir, (long)getpid());
+  assert(access(tmp, F_OK) != 0);
+  unlink(path); rmdir(dir);
+  free(path); free(dir);
+}
+
+static void test_daemon_status_snapshot(void){
+  char *dir = temp_dir();
+  char *log = join_path_dup(dir, "daemon.log");
+  char *status_path = join_path_dup(dir, "status.json");
+  char *config_text = daemon_config_text(log, 1, 1, 1, 0);
+  char *config = write_config(config_text);
+  free(config_text);
+  FakePlatformState state = {
+    .daemon_stop_after_collects = 1,
+    .process_path = "/opt/unknown",
+    .process_cwd = "/tmp/project",
+    .command_line = "UnknownProc --connect",
+    .fail_collect = 0,
+    .now_value = 1700000100
+  };
+  NetwatchPlatform platform = fake_platform(&state);
+  Capture cap = capture_daemon_status(config, status_path, &platform);
+  assert(cap.rc == 0);
+  char *status = must_read(status_path);
+  assert_contains(status, "\"status\": \"error\"");
+  assert_contains(status, "\"daemonRunning\": false");
+  assert_contains(status, "\"unknownCount\": 1");
+  assert_contains(status, "\"wouldDisableWifi\": true");
+  assert_contains(status, "\"wifiDisabled\": false");
+  assert_contains(status, "\"processName\": \"FakeProc\"");
+  free(status); capture_free(&cap);
+
+  state = (FakePlatformState){ .daemon_stop_after_collects = 2, .fail_collect = 1, .now_value = 1700000200 };
+  platform = fake_platform(&state);
+  cap = capture_daemon_status(config, status_path, &platform);
+  assert(cap.rc != 0);
+  status = must_read(status_path);
+  assert_contains(status, "\"status\": \"error\"");
+  assert_contains(status, "\"lastScanResult\": \"error\"");
+  free(status); capture_free(&cap);
+
+  unlink(config); unlink(log); unlink(status_path); rmdir(dir);
+  free(config); free(log); free(status_path); free(dir);
+}
+
+static void test_cli_status_json_mode(void){
+  char *home = temp_dir();
+  make_status_dirs(home);
+  char *saved_home = save_home_set(home);
+  char *watch = join_path_dup(home, ".watch");
+  char *status_path = join_path_dup(watch, "netwatch.status.json");
+  write_text_mode(status_path, "{\"version\":1,\"status\":\"ok\"}\n", 0644);
+
+  char *out = join_path_dup(home, "out.txt");
+  const char *old_path = getenv("PATH");
+  char path_env[4096];
+  snprintf(path_env, sizeof(path_env), "%s", old_path ? old_path : "");
+  assert(run_netwatch_mode_cwd("--status-json", NULL, NULL, path_env, out, home) == 0);
+  char *text = must_read(out);
+  assert_contains(text, "\"status\":\"ok\"");
+  free(text);
+  unlink(status_path);
+  assert(run_netwatch_mode_cwd("--status-json", NULL, NULL, path_env, out, home) != 0);
+  text = must_read(out);
+  assert_contains(text, "status snapshot unavailable");
+  free(text);
+
+  unlink(out); rmdir(watch); rmdir(home);
+  restore_home(saved_home);
+  free(home); free(watch); free(status_path); free(out);
 }
 
 static void test_launchd_daemon_plist(void){
@@ -2637,8 +2805,11 @@ int main(void){
   test_monitor_stats();
   test_daemon_mode();
   test_daemon_lock_path_canonicalizes_config();
+  test_status_snapshot_json();
+  test_daemon_status_snapshot();
   test_launchd_daemon_plist();
   test_cli_stats_mode();
+  test_cli_status_json_mode();
   test_status_command();
   test_status_missing_and_partial();
   test_cli_status_mode();

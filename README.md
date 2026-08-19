@@ -267,6 +267,115 @@ Recent startup error: none detected
 
 `no` means the state was checked and is false. `unavailable` means the command could not safely determine the value, for example because a log file is missing or a platform query failed.
 
+## Status snapshot JSON
+
+Daemon mode writes a compact machine-readable snapshot for the macOS menu bar app:
+
+```text
+~/.watch/netwatch.status.json
+```
+
+This project uses the user-writable `~/.watch` path because the default install is a user LaunchAgent. The file is written atomically through a temporary file and `rename()`, with mode `0644`.
+
+Print the current snapshot:
+
+```bash
+./netwatch --status-json
+```
+
+If the snapshot does not exist, `--status-json` exits non-zero with a clear error. It does not run `lsof`, scan connections, enter monitoring loops, or change Wi-Fi state.
+
+Important fields:
+
+```json
+{
+  "version": 1,
+  "status": "attention",
+  "daemonRunning": true,
+  "configValid": true,
+  "dryRun": true,
+  "lastScanAt": 1700000000,
+  "lastScanResult": "ok",
+  "unknownCount": 0,
+  "wouldDisableWifi": false,
+  "wifiDisabled": false,
+  "lastUnknownProcessSummary": null,
+  "activeConfigPath": "/Users/serg/.watch/netwatch.config.json",
+  "pollIntervalSeconds": 300
+}
+```
+
+Only the most recent unknown process summary is stored. The snapshot does not include process history, environment variables, or unbounded process lists.
+
+Menu bar status mapping:
+
+| Status JSON | `dryRun` | Result ok | Fresh: `now - lastScanAt <= pollIntervalSeconds` | Color |
+| --- | --- | --- | --- | --- |
+| unavailable / unreadable / invalid | any | any | any | gray |
+| off | yes | yes | green |
+| off | yes | no | red |
+| off | no | any | red |
+| on | yes | yes | orange |
+| on | yes | no | red |
+| on | no | any | red |
+
+`daemonRunning` is displayed in the menu but does not control the color. `Result ok` means `configValid=true`, `lastScanResult=ok`, `unknownCount=0`, `wouldDisableWifi=false`, and `wifiDisabled=false`. `dryRun=true` with a clean fresh scan is orange because protection is not enforcing; red is reserved for stale status or actual scan problems. In dry-run, `wifiDisabled` remains `false`; dry-run never disables Wi-Fi.
+The menu also shows the indicator color as text for accessibility. A `Reason` line is shown only when there is a problem or the status snapshot is unavailable.
+
+## Menu bar status indicator
+
+The repository includes a small native AppKit menu bar binary:
+
+```text
+packaging/menu-bar/NetwatchStatusBar.swift
+```
+
+Build it:
+
+```bash
+make statusbar
+```
+
+Install it for the current user:
+
+```bash
+make install-statusbar
+cp packaging/launchd/com.serg.netwatch.statusbar.plist "$HOME/Library/LaunchAgents/com.serg.netwatch.statusbar.plist"
+plutil -lint "$HOME/Library/LaunchAgents/com.serg.netwatch.statusbar.plist"
+```
+
+The example plist points to `/Users/serg/.watch/netwatch-statusbar`; adjust `ProgramArguments` if your install path is different.
+
+Run it directly:
+
+```bash
+~/.watch/netwatch-statusbar
+```
+
+A user LaunchAgent can keep it running:
+
+```bash
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.serg.netwatch.statusbar.plist"
+launchctl kickstart -k "gui/$(id -u)/com.serg.netwatch.statusbar"
+launchctl print "gui/$(id -u)/com.serg.netwatch.statusbar"
+```
+
+Stop it:
+
+```bash
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.serg.netwatch.statusbar.plist"
+```
+
+The indicator reads `~/.watch/netwatch.status.json`. It does not run scans, call `networksetup`, or change Wi-Fi state. The menu refreshes every 5 seconds and includes the current status, dry-run state, last scan result, unknown count, and most recent unknown process summary when present.
+
+The `Dry run: on/off` menu item is clickable. It updates only the top-level `dryRun` value in the active config path reported by the status snapshot, writes the config through a temporary file and atomic `rename()`, then requests daemon reload with:
+
+```bash
+launchctl kill SIGHUP "gui/$(id -u)/com.serg.netwatch"
+```
+
+The menu shows an `Action` line after a save or reload error.
+
 ## Audit mode
 
 Collect observed connection decisions without disabling Wi-Fi:

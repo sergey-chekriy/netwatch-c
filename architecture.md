@@ -50,6 +50,8 @@ Existing modules:
 - `monitor` - normal scan, logging, enforcement, dry-run, and stats orchestration;
 - `audit` - non-enforcing observation report;
 - `status` - launchd/runtime/config status command;
+- `status_snapshot` - daemon status JSON for future menu bar integration;
+- `packaging/menu-bar` - native AppKit status indicator with a dry-run config toggle;
 - `platform` - OS and filesystem boundary used by production code and tests;
 - `logging` - log output;
 - `wifi` - Wi-Fi disable functionality;
@@ -296,6 +298,12 @@ monitor.c
 daemon.c
     owns foreground daemon loop, signal flags, config reload and instance lock
 
+status_snapshot.c
+    serializes and atomically writes daemon status JSON for external UI readers
+
+packaging/menu-bar/NetwatchStatusBar.swift
+    renders a macOS menu bar status item from status JSON and can atomically toggle dryRun
+
 main.c
     parses CLI mode and dispatches to one module
 ```
@@ -334,7 +342,14 @@ The daemon loop:
 - checks simple signal flags for SIGTERM, SIGINT and SIGHUP;
 - reloads into a temporary `Config` and swaps only after validation succeeds;
 - keeps the previous valid config on reload failure unless `exitOnConfigError` is true;
+- writes `~/.watch/netwatch.status.json` after startup, scans, reloads and graceful shutdown;
 - calls shared monitor/policy code for each scan.
+
+The status snapshot stores only the latest scan result and latest unknown-process summary. It
+does not store process history, environment variables, or unbounded process lists.
+The menu bar indicator color is derived from the latest scan result, dry-run state, and
+freshness (`now - lastScanAt <= pollIntervalSeconds`). `daemonRunning` is displayed as status
+metadata but does not control the indicator color.
 
 Tests should prefer fake platform callbacks or fake executables on `PATH` over invoking real
 Wi-Fi, monitoring, or launchd side effects.

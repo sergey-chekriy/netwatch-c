@@ -4,6 +4,7 @@
 #include "daemon.h"
 #include "monitor.h"
 #include "status.h"
+#include "status_snapshot.h"
 #include "why.h"
 #include <errno.h>
 #include <limits.h>
@@ -14,7 +15,7 @@
 #define DEFAULT_CONFIG_PATH "./netwatch.config.json"
 
 static void print_usage(const char *argv0){
-  fprintf(stderr, "Usage: %s [config.json]\n       %s --once --config <config.json>\n       %s --daemon --config <config.json>\n       %s --dry-run [config.json]\n       %s --stats [config.json]\n       %s --audit [seconds]\n       %s --status\n       %s --convert-config <config.json>\n       %s --check-config <config.json>\n       %s --why <pid-or-executable-path>\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+  fprintf(stderr, "Usage: %s [config.json]\n       %s --once --config <config.json>\n       %s --daemon --config <config.json>\n       %s --dry-run [config.json]\n       %s --stats [config.json]\n       %s --audit [seconds]\n       %s --status\n       %s --status-json\n       %s --convert-config <config.json>\n       %s --check-config <config.json>\n       %s --why <pid-or-executable-path>\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static int parse_duration(const char *text, int *out){
@@ -54,6 +55,16 @@ int main(int argc, char **argv){
   if (argc > 1 && !strcmp(argv[1], "--status")){
     if (argc != 2){ print_usage(argv[0]); return 1; }
     return status_command();
+  }
+  if (argc > 1 && !strcmp(argv[1], "--status-json")){
+    if (argc != 2){ print_usage(argv[0]); return 1; }
+    char err[512] = {0};
+    char *path = netwatch_status_default_path();
+    if (!path){ fprintf(stderr, "ERROR: out of memory building status path\n"); return 1; }
+    int ok = netwatch_status_print_json(path, netwatch_platform_default(), err, sizeof(err));
+    if (!ok) fprintf(stderr, "ERROR: status snapshot unavailable: %s\n", err);
+    free(path);
+    return ok ? 0 : 1;
   }
   if (argc > 1 && !strcmp(argv[1], "--stats")){
     if (argc > 3){ print_usage(argv[0]); return 1; }

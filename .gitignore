@@ -1,5 +1,6 @@
 prompts
 netwatch
+netwatch-statusbar
 *.o
 *.dSYM/
 .DS_Store

@@ -2,6 +2,7 @@
 #include "config.h"
 #include "logging.h"
 #include "monitor.h"
+#include "status_snapshot.h"
 #include "util.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -85,11 +86,12 @@ static void log_reload_error(const Config *cfg, const NetwatchPlatform *platform
   free(log_path);
 }
 
-static int reload_config(const char *config_path, Config *cfg, const NetwatchPlatform *platform){
-  char err[512] = {0};
+static int reload_config(const char *config_path, Config *cfg, const NetwatchPlatform *platform, int *kept_previous, char *err, size_t err_len){
+  if (kept_previous) *kept_previous = 0;
   Config next = {0};
-  if (!config_load_with_platform(&next, config_path, platform, err, sizeof(err))){
+  if (!config_load_with_platform(&next, config_path, platform, err, err_len)){
     fprintf(stderr, "ERROR: %s\n", err);
+    if (kept_previous) *kept_previous = 1;
     if (cfg->daemon.exit_on_config_error) return 0;
     log_reload_error(cfg, platform, err);
     return 1;
@@ -99,7 +101,23 @@ static int reload_config(const char *config_path, Config *cfg, const NetwatchPla
   return 1;
 }
 
-int daemon_run_with_platform(const char *config_path, const NetwatchPlatform *platform){
+static MonitorScanOutcome error_outcome(const NetwatchPlatform *platform){
+  MonitorScanOutcome outcome = {0};
+  snprintf(outcome.last_scan_result, sizeof(outcome.last_scan_result), "error");
+  outcome.last_scan_at = platform->now ? platform->now(platform) : time(NULL);
+  return outcome;
+}
+
+static int write_status_for_scan(const char *status_path, const char *config_path, const Config *cfg, const MonitorScanOutcome *outcome, int daemon_running, int config_valid, const NetwatchPlatform *platform){
+  NetwatchStatusSnapshot snapshot;
+  char err[512] = {0};
+  netwatch_status_snapshot_from_scan(&snapshot, config_path, cfg, outcome, daemon_running, config_valid);
+  if (netwatch_status_write(status_path, &snapshot, platform, err, sizeof(err))) return 1;
+  fprintf(stderr, "ERROR: %s\n", err);
+  return 0;
+}
+
+int daemon_run_with_status_path(const char *config_path, const char *status_path, const NetwatchPlatform *platform){
   if (!config_path || !*config_path){ fprintf(stderr, "ERROR: config path is required\n"); return 1; }
   platform = netwatch_platform_or_default(platform);
   stop_requested = 0; reload_requested = 0;
@@ -110,23 +128,64 @@ int daemon_run_with_platform(const char *config_path, const NetwatchPlatform *pl
   if (!config_load_with_platform(&cfg, config_path, platform, err, sizeof(err))){ fprintf(stderr, "ERROR: %s\n", err); return 1; }
   int lock_fd = acquire_lock(config_path, err, sizeof(err));
   if (lock_fd < 0){ fprintf(stderr, "ERROR: %s\n", err); config_free(&cfg); return 1; }
+  if (!write_status_for_scan(status_path, config_path, &cfg, NULL, 1, 1, platform)){ close(lock_fd); config_free(&cfg); return 1; }
 
   int rc = 0;
+  int config_file_valid = 1;
+  MonitorScanOutcome last_outcome = {0};
   while (!should_stop(platform)){
-    if (should_reload(platform) && cfg.daemon.reload_on_sighup && !reload_config(config_path, &cfg, platform)){ rc = 1; break; }
-    rc = monitor_scan_config(&cfg, NULL, platform);
+    if (should_reload(platform) && cfg.daemon.reload_on_sighup){
+      int kept_previous = 0;
+      char reload_err[512] = {0};
+      if (!reload_config(config_path, &cfg, platform, &kept_previous, reload_err, sizeof(reload_err))){
+        MonitorScanOutcome outcome = error_outcome(platform);
+        write_status_for_scan(status_path, config_path, &cfg, &outcome, 1, 0, platform);
+        rc = 1; break;
+      }
+      config_file_valid = !kept_previous;
+      MonitorScanOutcome reload_outcome = {0};
+      MonitorScanOutcome *reload_status = last_outcome.last_scan_result[0] ? &last_outcome : NULL;
+      if (kept_previous){ reload_outcome = error_outcome(platform); reload_status = &reload_outcome; }
+      if (!write_status_for_scan(status_path, config_path, &cfg, reload_status, 1, config_file_valid, platform)){ rc = 1; break; }
+    }
+    MonitorScanOutcome outcome = {0};
+    rc = monitor_scan_config_with_outcome(&cfg, NULL, &outcome, platform);
+    last_outcome = outcome;
+    if (!write_status_for_scan(status_path, config_path, &cfg, &outcome, 1, config_file_valid, platform)){ rc = 1; break; }
     if (rc != 0) break;
     if (should_stop(platform)) break;
     if (should_reload(platform)){
-      if (cfg.daemon.reload_on_sighup && !reload_config(config_path, &cfg, platform)){ rc = 1; break; }
+      if (cfg.daemon.reload_on_sighup){
+        int kept_previous = 0;
+        char reload_err[512] = {0};
+        if (!reload_config(config_path, &cfg, platform, &kept_previous, reload_err, sizeof(reload_err))){
+          MonitorScanOutcome outcome = error_outcome(platform);
+          write_status_for_scan(status_path, config_path, &cfg, &outcome, 1, 0, platform);
+          rc = 1; break;
+        }
+        config_file_valid = !kept_previous;
+        MonitorScanOutcome reload_outcome = {0};
+        MonitorScanOutcome *reload_status = last_outcome.last_scan_result[0] ? &last_outcome : NULL;
+        if (kept_previous){ reload_outcome = error_outcome(platform); reload_status = &reload_outcome; }
+        if (!write_status_for_scan(status_path, config_path, &cfg, reload_status, 1, config_file_valid, platform)){ rc = 1; break; }
+      }
       if (should_stop(platform)) break;
     }
     if (platform->sleep_seconds) platform->sleep_seconds(platform, (unsigned int)cfg.daemon.poll_interval_seconds);
     else sleep((unsigned int)cfg.daemon.poll_interval_seconds);
   }
 
+  if (rc == 0) write_status_for_scan(status_path, config_path, &cfg, last_outcome.last_scan_result[0] ? &last_outcome : NULL, 0, config_file_valid, platform);
   close(lock_fd);
   config_free(&cfg);
+  return rc;
+}
+
+int daemon_run_with_platform(const char *config_path, const NetwatchPlatform *platform){
+  char *status_path = netwatch_status_default_path();
+  if (!status_path){ fprintf(stderr, "ERROR: out of memory building status path\n"); return 1; }
+  int rc = daemon_run_with_status_path(config_path, status_path, platform);
+  free(status_path);
   return rc;
 }
 
