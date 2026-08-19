@@ -284,6 +284,9 @@ apple_trust.c
 trusted_publisher.c
     evaluates configured third-party path, Team ID and signing identifier
 
+trusted_workspace.c
+    evaluates configured interpreter path, process cwd and resolved script path
+
 allow.c
     applies policy priority and returns final decision
 
@@ -309,6 +312,7 @@ The default platform implementation:
 - invokes `lsof`, `networksetup`, and `launchctl` directly with `posix_spawnp`;
 - does not invoke a shell for production command execution;
 - resolves executable paths with `proc_pidpath` first and `lsof` only as a fallback;
+- resolves process cwd, argv, parent pid, and command line through injectable platform callbacks;
 - keeps filesystem operations for config conversion behind injectable callbacks;
 - exposes Apple trust verification as an injectable callback for deterministic tests.
 
@@ -324,6 +328,7 @@ Policy order:
 ```text
 deny
 -> trusted publisher rule
+-> trusted workspace rule
 -> localhost LISTEN
 -> explicit path/remote allow
 -> Apple system trust
@@ -349,6 +354,22 @@ The platform layer obtains signed identity metadata with Security.framework. It 
 signature before reading `kSecCodeInfoTeamIdentifier` and `kSecCodeInfoIdentifier`. The runtime
 does not use executable hashes, certificate common names, display names, versions, or modification
 times for trusted publisher decisions.
+
+## 10.3 Trusted workspace rules
+
+Trusted workspace rules are configured separately from both `trustedPublishers` and path-only
+`allowProcesses`. They are only for interpreter-launched scripts.
+
+For a trusted workspace allow, the evaluator requires:
+
+- exact configured interpreter executable path, with `realpath()` equivalence where practical;
+- process cwd inside a configured root;
+- resolved script path from argv inside the same root, unless `allowByCwdOnly` is explicitly true.
+
+The root comparison is component-aware: `/trusted/app2` does not match `/trusted/app`. Runtime
+paths are canonicalized with `realpath()` where practical, so symlink escapes fail closed. If an
+interpreter path matches a workspace rule but cwd or script verification fails, the result is
+terminal `unknown` and does not fall back to `allowProcesses` or Apple system trust.
 
 ## 11. Process display name
 

@@ -49,6 +49,7 @@ static void stats_count_policy(MonitorStats *stats, ConnectionPolicy policy){
   if (!stats) return;
   if (policy.decision == CONNECTION_ALLOWED_APPLE_SYSTEM) stats->apple_trusted_decisions++;
   else if (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER) stats->trusted_publisher_matches++;
+  else if (policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE) stats->trusted_workspace_matches++;
   else if (policy.decision == CONNECTION_ALLOWED_CONFIG) stats->explicit_allow_matches++;
   else if (policy.decision == CONNECTION_DENIED) stats->deny_matches++;
   else if (policy.decision == CONNECTION_UNKNOWN) stats->unknown_decisions++;
@@ -79,6 +80,7 @@ void monitor_stats_print(const MonitorStats *stats){
   printf("Unique executable paths: %zu\n", stats->unique_executable_paths);
   printf("Apple-trusted decisions: %zu\n", stats->apple_trusted_decisions);
   printf("Trusted publisher matches: %zu\n", stats->trusted_publisher_matches);
+  printf("Trusted workspace matches: %zu\n", stats->trusted_workspace_matches);
   printf("Trusted publisher invalid signatures: %zu\n", stats->trusted_publisher_invalid_signatures);
   printf("Trusted publisher Team ID mismatches: %zu\n", stats->trusted_publisher_team_id_mismatches);
   printf("Trusted publisher signing identifier mismatches: %zu\n", stats->trusted_publisher_signing_identifier_mismatches);
@@ -126,7 +128,9 @@ int monitor_run_with_stats(const char *cfg_path, bool force_dry_run, MonitorStat
         if (!ok){ fprintf(stderr, "ERROR: out of memory collecting monitor statistics\n"); rc = 1; goto done; }
       }
     }
-    if (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER) log_trusted_publisher_success(&cfg, connections.items[i], &cache, policy, platform);
+    if (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER || policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE){
+      log_trusted_publisher_success(&cfg, connections.items[i], &cache, policy, platform);
+    }
     if (connection_decision_allowed(policy.decision)) continue;
     char *desc = describe_connection_with_platform(connections.items[i], &cache, policy, platform);
     if (!desc || !strlist_push(&suspicious, desc)){ free(desc); fprintf(stderr, "ERROR: out of memory\n"); rc = 1; goto done; }

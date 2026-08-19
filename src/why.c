@@ -1,6 +1,9 @@
 #include "why.h"
 #include "config.h"
 #include "util.h"
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,13 +13,16 @@ static const char *path_basename(const char *path){
   return base && base[1] ? base + 1 : path;
 }
 
-static char *synthetic_line(const char *proc){
+static char *synthetic_line_for_pid(const char *proc, int pid){
   const char *tail = " 0 user 0u IPv4 TCP 0.0.0.0:0->0.0.0.0:0 (ESTABLISHED)";
-  size_t n = strlen(proc) + strlen(tail) + 1;
+  char pid_text[32]; snprintf(pid_text, sizeof(pid_text), "%d", pid);
+  size_t n = strlen(proc) + strlen(pid_text) + strlen(tail) + 1;
   char *line = malloc(n); if (!line) return NULL;
-  snprintf(line, n, "%s%s", proc, tail);
+  snprintf(line, n, "%s %s%s", proc, pid_text, tail + 2);
   return line;
 }
+
+static char *synthetic_line(const char *proc){ return synthetic_line_for_pid(proc, 0); }
 
 static int matching_allow_rule(const Config *cfg, const char *path, const ProcessRule **rule_out){
   int matches = 0;
@@ -44,11 +50,20 @@ static int explain_policy_for_proc(const Config *cfg, const char *proc, const ch
   return 1;
 }
 
+static int explain_policy_for_pid(const Config *cfg, int pid, const char *proc, const char *path, const NetwatchPlatform *platform, ConnectionPolicy *policy){
+  char *line = synthetic_line_for_pid(proc, pid);
+  if (!line) return 0;
+  *policy = connection_policy_for_pid_path_with_platform(line, proc, path, pid, cfg, platform);
+  free(line);
+  return 1;
+}
+
 static const char *why_decision_name(ConnectionDecision decision){
   switch (decision){
     case CONNECTION_DENIED: return "DENIED";
     case CONNECTION_ALLOWED_LOCALHOST:
     case CONNECTION_ALLOWED_TRUSTED_PUBLISHER:
+    case CONNECTION_ALLOWED_TRUSTED_WORKSPACE:
     case CONNECTION_ALLOWED_CONFIG: return "ALLOWED";
     case CONNECTION_ALLOWED_APPLE_SYSTEM: return "APPLE_SYSTEM";
     case CONNECTION_UNKNOWN: return "UNKNOWN";
@@ -58,6 +73,7 @@ static const char *why_decision_name(ConnectionDecision decision){
 
 static const char *trust_source_name(ConnectionPolicy policy){
   if (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER) return "TRUSTED_PUBLISHER";
+  if (policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE) return "TRUSTED_WORKSPACE";
   if (policy.decision == CONNECTION_ALLOWED_APPLE_SYSTEM) return "APPLE_SYSTEM";
   if (policy.decision == CONNECTION_ALLOWED_CONFIG) return "CONFIG";
   if (policy.decision == CONNECTION_DENIED) return "DENY";
@@ -92,6 +108,30 @@ static void print_policy(ConnectionPolicy policy){
     } else {
       printf("  %s\n", trusted_publisher_result_name(policy.trusted_publisher));
     }
+  } else if (policy.trusted_workspace_checked){
+    printf("  interpreter matched");
+    if (policy.matched_workspace) printf(" trustedWorkspaces.%s", policy.matched_workspace);
+    if (policy.matched_workspace_interpreter) printf(": %s", policy.matched_workspace_interpreter);
+    printf("\n");
+    if (policy.trusted_workspace == TRUSTED_WORKSPACE_OK){
+      printf("  cwd is inside trusted workspace root\n");
+      if (policy.trusted_workspace_script[0]) printf("  script path is inside trusted workspace root\n");
+      else printf("  allowByCwdOnly accepted cwd-only workspace process\n");
+    } else if (policy.trusted_workspace == TRUSTED_WORKSPACE_CWD_UNAVAILABLE){
+      printf("  cwd is unavailable\n");
+    } else if (policy.trusted_workspace == TRUSTED_WORKSPACE_CWD_OUTSIDE_ROOT){
+      printf("  cwd is outside trusted workspace root\n");
+    } else if (policy.trusted_workspace == TRUSTED_WORKSPACE_SCRIPT_UNAVAILABLE){
+      printf("  script path is unavailable\n");
+    } else if (policy.trusted_workspace == TRUSTED_WORKSPACE_SCRIPT_OUTSIDE_ROOT){
+      printf("  cwd is inside trusted workspace root\n");
+      printf("  script path is outside trusted workspace root\n");
+    } else {
+      printf("  %s\n", trusted_workspace_result_name(policy.trusted_workspace));
+    }
+    if (policy.matched_workspace_root[0]) printf("\nTrusted workspace root:\n  %s\n", policy.matched_workspace_root);
+    if (policy.trusted_workspace_cwd[0]) printf("\nProcess cwd:\n  %s\n", policy.trusted_workspace_cwd);
+    if (policy.trusted_workspace_script[0]) printf("\nResolved script path:\n  %s\n", policy.trusted_workspace_script);
   } else if (policy.decision == CONNECTION_ALLOWED_CONFIG){
     if (policy.matched_process) printf("  matched allowProcesses.%s\n", policy.matched_process);
     if (policy.matched_path) printf("  matched path: %s\n", policy.matched_path);
@@ -106,8 +146,37 @@ static void print_policy(ConnectionPolicy policy){
   }
 }
 
+static int parse_pid_target(const char *target, int *pid){
+  for (const char *p = target; p && *p; p++) if (!isdigit((unsigned char)*p)) return 0;
+  errno = 0;
+  char *end = NULL;
+  long value = strtol(target, &end, 10);
+  if (errno || !end || *end || value <= 0 || value > INT_MAX) return 0;
+  *pid = (int)value;
+  return 1;
+}
+
 static int why_explain_base(const Config *cfg, const char *target, const NetwatchPlatform *platform, PolicyAppleVerifier verifier){
-  if (!cfg || !target || !*target){ fprintf(stderr, "ERROR: executable path is required\n"); return 1; }
+  if (!cfg || !target || !*target){ fprintf(stderr, "ERROR: pid or executable path is required\n"); return 1; }
+  int target_pid = 0;
+  if (parse_pid_target(target, &target_pid)){
+    platform = netwatch_platform_or_default(platform);
+    char *path = platform->process_path ? platform->process_path(platform, target_pid, "") : NULL;
+    if (!path || !strcmp(path, "unknown")){
+      free(path);
+      fprintf(stderr, "ERROR: failed to resolve executable path for pid %d\n", target_pid);
+      return 1;
+    }
+    ConnectionPolicy policy = {0};
+    if (!explain_policy_for_pid(cfg, target_pid, path_basename(path), path, platform, &policy)){
+      free(path);
+      fprintf(stderr, "ERROR: out of memory explaining decision\n");
+      return 1;
+    }
+    print_policy(policy);
+    free(path);
+    return 0;
+  }
   if (target[0] != '/'){
     fprintf(stderr, "ERROR: unresolved process name: %s\nPass an absolute executable path.\n", target);
     return 1;
@@ -123,7 +192,7 @@ static int why_explain_base(const Config *cfg, const char *target, const Netwatc
     print_policy(policy);
     return 0;
   }
-  if (policy.decision != CONNECTION_ALLOWED_CONFIG && !policy.trusted_publisher_checked){
+  if (policy.decision != CONNECTION_ALLOWED_CONFIG && !policy.trusted_publisher_checked && !policy.trusted_workspace_checked){
     const ProcessRule *rule = NULL;
     int matches = matching_allow_rule(cfg, target, &rule);
     if (matches > 1){ fprintf(stderr, "ERROR: executable path matches multiple allowProcesses entries: %s\n", target); return 1; }

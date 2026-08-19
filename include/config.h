@@ -3,6 +3,7 @@
 
 #include "platform.h"
 #include "strlist.h"
+#include "trusted_workspace.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -20,6 +21,7 @@ typedef struct {
   StrList allow_remote_hosts;
   ProcessRules allow_processes;
   TrustedPublisherRules trusted_publishers;
+  TrustedWorkspaceRules trusted_workspaces;
 } Config;
 
 int config_load(Config *cfg, const char *path, char *err, size_t err_len);

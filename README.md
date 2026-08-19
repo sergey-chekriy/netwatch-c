@@ -371,7 +371,7 @@ ERROR:
 Explain how the current policy classifies one executable path without starting monitoring:
 
 ```bash
-./netwatch --why /path/to/executable
+./netwatch --why <pid-or-executable-path>
 ```
 
 This command loads `./netwatch.config.json`, uses the same policy engine as monitoring, and prints one of:
@@ -431,13 +431,13 @@ Reason:
   not an automatically trusted Apple system component
 ```
 
-Explicit deny still has priority over trusted publishers, explicit allow, and Apple system trust:
+Explicit deny still has priority over trusted publishers, trusted workspaces, explicit allow, and Apple system trust:
 
 ```text
-deny -> trusted publisher -> explicit allow -> Apple system trust -> unknown
+deny -> trusted publisher -> trusted workspace -> explicit allow -> Apple system trust -> unknown
 ```
 
-`--why` exits before `lsof`, process scanning, monitoring loops, launchd-specific runtime behavior, or Wi-Fi changes. The current implementation accepts absolute executable paths only; process-name resolution is intentionally not enabled unless it can be made unambiguous.
+`--why` exits before `lsof`, process scanning, monitoring loops, launchd-specific runtime behavior, or Wi-Fi changes. It accepts an absolute executable path or a PID. Use a PID when explaining interpreter-based trusted workspace rules because cwd and argv are process metadata.
 
 ## Configuration
 
@@ -449,6 +449,7 @@ Example:
   "dryRun": true,
   "allowAppleSystemComponents": true,
   "trustedPublishers": {},
+  "trustedWorkspaces": {},
   "interface": "Wi-Fi",
   "logPath": "/Users/serg/.watch/netwatch.log",
 
@@ -563,6 +564,37 @@ These commands are only documentation aids. `netwatch` itself uses Security.fram
 
 Manual migration is optional: move one reviewed path from `allowProcesses` into `trustedPublishers`, fill in the observed Team ID and signing identifier, then run `./netwatch --check-config /path/to/config.json`. Existing `allowProcesses` rules remain supported for paths not covered by a trusted publisher rule.
 
+### `trustedWorkspaces`
+
+`trustedWorkspaces` is for interpreter-based scripts. It lets you allow `node`, `python`, `ruby`, `bash`, or another interpreter only when the process cwd and resolved script path are inside an explicitly trusted project root:
+
+```json
+"trustedWorkspaces": {
+  "autotrade-data-scripts": {
+    "roots": [
+      "/Users/serg/Docs/work/autotrade/my_auto_trade/backtrading/upbot"
+    ],
+    "allowSubdirectories": true,
+    "interpreters": [
+      "/Users/serg/.local/share/fnm/node-versions/v24.16.0/installation/bin/node"
+    ],
+    "allowByCwdOnly": false
+  }
+}
+```
+
+Each rule requires non-empty `roots`, `allowSubdirectories`, and `interpreters`. `allowByCwdOnly` is optional and defaults to `false`. Wildcards and relative paths are rejected. Runtime matching canonicalizes paths with `realpath()` where practical, so `/trusted/app2` does not match `/trusted/app` and symlinked scripts that escape the root are rejected.
+
+For a trusted workspace allow, all of these must pass:
+
+```text
+interpreter executable path matches
+process cwd is inside the matched root
+resolved script path is inside the same matched root
+```
+
+Relative script paths from argv are resolved against cwd. If the script path cannot be resolved, the rule fails closed unless `allowByCwdOnly` is explicitly `true`. Do not add a global `allowProcesses` entry for `node`, `python`, `ruby`, or `bash`; use `trustedWorkspaces` for project-scoped interpreter trust.
+
 ### `interface`
 
 The Wi-Fi interface name used by `networksetup`:
@@ -581,7 +613,7 @@ Path to the log file:
 "logPath": "/Users/serg/.watch/netwatch.log"
 ```
 
-The tool logs suspicious connections, errors, and successful trusted publisher verifications. It does not write `OK` runs to the log.
+The tool logs suspicious connections, errors, successful trusted publisher verifications, and successful trusted workspace verifications. It does not write `OK` runs to the log.
 
 ### `denyPatterns`
 
@@ -667,11 +699,13 @@ For each active connection:
 1. If the line matches denyPatterns → suspicious
 2. Else if executable path matches trustedPublishers and publisher identity verifies → allowed
 3. Else if executable path matches trustedPublishers but verification fails → suspicious
-4. Else if it is localhost LISTEN → allowed
-5. Else if process name and executable path match allowProcesses → allowed
-6. Else if remote host starts with one of allowRemoteHosts → allowed
-7. Else if allowAppleSystemComponents is true and the executable is a trusted Apple system component → allowed
-8. Else → suspicious
+4. Else if interpreter path matches trustedWorkspaces and cwd/script verify → allowed
+5. Else if interpreter path matches trustedWorkspaces but cwd/script verification fails → suspicious
+6. Else if it is localhost LISTEN → allowed
+7. Else if process name and executable path match allowProcesses → allowed
+8. Else if remote host starts with one of allowRemoteHosts → allowed
+9. Else if allowAppleSystemComponents is true and the executable is a trusted Apple system component → allowed
+10. Else → suspicious
 ```
 
 When suspicious connections are found, the log entry looks like this:
@@ -683,6 +717,12 @@ DRY RUN: would disable Wi-Fi
   PATH: /Applications/WhatsApp.app/Contents/MacOS/WhatsApp
   REASON: not present in allowlist
   APPLE TRUST: path is not an approved system path
+  PID: 12562
+  PPID: 1
+  COMMAND LINE: /Applications/WhatsApp.app/Contents/MacOS/WhatsApp
+  RUNTIME CWD: /Users/serg
+  REMOTE ENDPOINT: 31.13.72.48:5222
+  PARENT COMMAND: launchd
 ```
 
 Successful trusted publisher decisions are logged distinctly from ordinary path-only allows:
@@ -695,6 +735,19 @@ Successful trusted publisher decisions are logged distinctly from ordinary path-
   PUBLISHER RULE: Google Chrome
   ACTUAL TEAM ID: EXPECTED_TEAM_ID
   ACTUAL SIGNING IDENTIFIER: com.google.Chrome
+```
+
+Successful trusted workspace decisions are logged separately:
+
+```text
+[TRUSTED_WORKSPACE] node
+  PATH: /Users/serg/.local/share/fnm/node-versions/v24.16.0/installation/bin/node
+  REASON: trusted workspace script verified
+  TRUSTED WORKSPACE: trusted workspace script verified
+  WORKSPACE RULE: autotrade-data-scripts
+  WORKSPACE ROOT: /Users/serg/Docs/work/autotrade/my_auto_trade/backtrading/upbot
+  CWD: /Users/serg/Docs/work/autotrade/my_auto_trade/backtrading/upbot
+  SCRIPT: /Users/serg/Docs/work/autotrade/my_auto_trade/backtrading/upbot/script.js
 ```
 
 ## Install as a launchd job

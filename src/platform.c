@@ -17,6 +17,7 @@
 #include <unistd.h>
 #ifdef __APPLE__
 #include <libproc.h>
+#include <sys/sysctl.h>
 #endif
 
 extern char **environ;
@@ -293,6 +294,83 @@ static char *platform_process_path_default(const NetwatchPlatform *platform, int
   return path ? path : xstrdup("unknown");
 }
 
+static char *platform_process_cwd_default(const NetwatchPlatform *platform, int pid){
+  (void)platform;
+#ifdef __APPLE__
+  struct proc_vnodepathinfo info;
+  memset(&info, 0, sizeof(info));
+  if (proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, sizeof(info)) <= 0) return NULL;
+  return info.pvi_cdir.vip_path[0] ? xstrdup(info.pvi_cdir.vip_path) : NULL;
+#else
+  (void)pid; return NULL;
+#endif
+}
+
+static int platform_process_argv_default(const NetwatchPlatform *platform, int pid, StrList *argv, char *err, size_t err_len){
+  (void)platform;
+#ifdef __APPLE__
+  int mib[] = { CTL_KERN, KERN_PROCARGS2, pid };
+  size_t size = 0;
+  if (sysctl(mib, 3, NULL, &size, NULL, 0) != 0 || !size){
+    set_error(err, err_len, "failed to read process argv size");
+    return 0;
+  }
+  char *buf = malloc(size);
+  if (!buf){ set_error(err, err_len, "out of memory reading process argv"); return 0; }
+  if (sysctl(mib, 3, buf, &size, NULL, 0) != 0 || size < sizeof(int)){
+    free(buf); set_error(err, err_len, "failed to read process argv");
+    return 0;
+  }
+  int argc = 0;
+  memcpy(&argc, buf, sizeof(argc));
+  char *p = buf + sizeof(argc), *end = buf + size;
+  while (p < end && *p) p++;
+  while (p < end && !*p) p++;
+  for (int i = 0; i < argc && p < end && *p; i++){
+    if (!strlist_push(argv, p)){ free(buf); set_error(err, err_len, "out of memory reading process argv"); return 0; }
+    p += strlen(p) + 1;
+    while (p < end && !*p) p++;
+  }
+  free(buf);
+  if (!argv->len){ set_error(err, err_len, "process argv unavailable"); return 0; }
+  return 1;
+#else
+  (void)pid; (void)argv;
+  set_error(err, err_len, "process argv unavailable on this platform");
+  return 0;
+#endif
+}
+
+static int platform_process_parent_pid_default(const NetwatchPlatform *platform, int pid, int *ppid){
+  (void)platform;
+#ifdef __APPLE__
+  struct proc_bsdinfo info;
+  memset(&info, 0, sizeof(info));
+  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) <= 0) return 0;
+  if (ppid) *ppid = (int)info.pbi_ppid;
+  return 1;
+#else
+  (void)pid; (void)ppid; return 0;
+#endif
+}
+
+static char *platform_process_command_line_default(const NetwatchPlatform *platform, int pid){
+  StrList argv = {0};
+  char err[128] = {0};
+  if (!platform_process_argv_default(platform, pid, &argv, err, sizeof(err))) return NULL;
+  size_t n = 1;
+  for (size_t i = 0; i < argv.len; i++) n += strlen(argv.items[i]) + 1;
+  char *out = calloc(1, n);
+  if (out){
+    for (size_t i = 0; i < argv.len; i++){
+      strcat(out, argv.items[i]);
+      if (i + 1 < argv.len) strcat(out, " ");
+    }
+  }
+  strlist_free(&argv);
+  return out;
+}
+
 static int collect_connection_line(const char *line, void *ctx){
   if (!strstr(line, "ESTABLISHED") && !strstr(line, "LISTEN")) return 1;
   return strlist_push((StrList *)ctx, line);
@@ -471,6 +549,10 @@ static const NetwatchPlatform default_platform = {
   .fsync_parent_dir = platform_fsync_parent_dir_default,
   .collect_connections = platform_collect_connections_default,
   .process_path = platform_process_path_default,
+  .process_cwd = platform_process_cwd_default,
+  .process_argv = platform_process_argv_default,
+  .process_parent_pid = platform_process_parent_pid_default,
+  .process_command_line = platform_process_command_line_default,
   .apple_trust_check = platform_apple_trust_check_default,
   .code_signature_identity = platform_code_signature_identity_default,
   .disable_wifi = platform_disable_wifi_default,

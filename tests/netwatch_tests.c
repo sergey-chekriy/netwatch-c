@@ -133,11 +133,21 @@ typedef struct {
   int identity_calls;
   int collect_calls;
   int process_path_calls;
+  int process_cwd_calls;
+  int process_argv_calls;
+  int process_parent_pid_calls;
+  int process_command_line_calls;
   int wifi_calls;
   int copy_calls;
   int fail_copy;
   int fail_wifi;
   const char *process_path;
+  const char *process_cwd;
+  const char **process_argv;
+  size_t process_argv_count;
+  int parent_pid;
+  const char *command_line;
+  const char *parent_command_line;
   const char **connections;
   size_t connection_count;
   const char **process_paths;
@@ -193,6 +203,38 @@ static char *fake_platform_process_path(const NetwatchPlatform *platform, int pi
   return xstrdup(state->process_path ? state->process_path : "unknown");
 }
 
+static char *fake_platform_process_cwd(const NetwatchPlatform *platform, int pid){
+  (void)pid;
+  FakePlatformState *state = platform->ctx;
+  state->process_cwd_calls++;
+  return state->process_cwd ? xstrdup(state->process_cwd) : NULL;
+}
+
+static int fake_platform_process_argv(const NetwatchPlatform *platform, int pid, StrList *argv, char *err, size_t err_len){
+  (void)pid; (void)err; (void)err_len;
+  FakePlatformState *state = platform->ctx;
+  state->process_argv_calls++;
+  if (!state->process_argv) return 0;
+  for (size_t i = 0; i < state->process_argv_count; i++) if (!strlist_push(argv, state->process_argv[i])) return 0;
+  return 1;
+}
+
+static int fake_platform_process_parent_pid(const NetwatchPlatform *platform, int pid, int *ppid){
+  (void)pid;
+  FakePlatformState *state = platform->ctx;
+  state->process_parent_pid_calls++;
+  if (!state->parent_pid) return 0;
+  if (ppid) *ppid = state->parent_pid;
+  return 1;
+}
+
+static char *fake_platform_process_command_line(const NetwatchPlatform *platform, int pid){
+  FakePlatformState *state = platform->ctx;
+  state->process_command_line_calls++;
+  if (pid == state->parent_pid && state->parent_command_line) return xstrdup(state->parent_command_line);
+  return state->command_line ? xstrdup(state->command_line) : NULL;
+}
+
 static int fake_platform_disable_wifi(const NetwatchPlatform *platform, const char *interface, char *err, size_t err_len){
   FakePlatformState *state = platform->ctx;
   state->wifi_calls++;
@@ -244,6 +286,10 @@ static NetwatchPlatform fake_platform(FakePlatformState *state){
   platform.apple_trust_check = fake_platform_apple;
   platform.collect_connections = fake_platform_collect;
   platform.process_path = fake_platform_process_path;
+  platform.process_cwd = fake_platform_process_cwd;
+  platform.process_argv = fake_platform_process_argv;
+  platform.process_parent_pid = fake_platform_process_parent_pid;
+  platform.process_command_line = fake_platform_process_command_line;
   platform.disable_wifi = fake_platform_disable_wifi;
   platform.code_signature_identity = fake_platform_identity;
   platform.copy_file = fake_platform_copy_file;
@@ -849,6 +895,211 @@ static void test_config_trusted_publishers(void){
   assert_config_error("{\"trustedPublishers\":[]}\n", "trustedPublishers must be an object");
 }
 
+static void test_config_trusted_workspaces(void){
+  Config cfg = parse_config_ok("{\"version\":2,\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n");
+  assert(cfg.trusted_workspaces.len == 0);
+  config_free(&cfg);
+
+  cfg = parse_config_ok(
+    "{\n"
+    "  \"version\": 2,\n"
+    "  \"trustedWorkspaces\": {\n"
+    "    \"scripts\": {\n"
+    "      \"roots\": [\"/Users/serg/project\"],\n"
+    "      \"allowSubdirectories\": true,\n"
+    "      \"interpreters\": [\"/usr/local/bin/node\"]\n"
+    "    },\n"
+    "    \"cwd-only\": {\n"
+    "      \"roots\": [\"/Users/serg/one\"],\n"
+    "      \"allowSubdirectories\": false,\n"
+    "      \"interpreters\": [\"/bin/bash\"],\n"
+    "      \"allowByCwdOnly\": true\n"
+    "    }\n"
+    "  }\n"
+    "}\n");
+  assert(cfg.trusted_workspaces.len == 2);
+  assert(!strcmp(cfg.trusted_workspaces.items[0].name, "scripts"));
+  assert(!strcmp(cfg.trusted_workspaces.items[0].roots.items[0], "/Users/serg/project"));
+  assert(cfg.trusted_workspaces.items[0].allow_subdirectories);
+  assert(!cfg.trusted_workspaces.items[0].allow_by_cwd_only);
+  assert(!strcmp(cfg.trusted_workspaces.items[0].interpreters.items[0], "/usr/local/bin/node"));
+  assert(cfg.trusted_workspaces.items[1].allow_by_cwd_only);
+  config_free(&cfg);
+
+  assert_config_error("{\"trustedWorkspaces\":[]}\n", "trustedWorkspaces must be an object");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"allowSubdirectories\":true,\"interpreters\":[\"/bin/node\"]}}}\n", "trustedWorkspaces.w.roots expected non-empty array");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[],\"allowSubdirectories\":true,\"interpreters\":[\"/bin/node\"]}}}\n", "trustedWorkspaces.w.roots expected non-empty array");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"\"],\"allowSubdirectories\":true,\"interpreters\":[\"/bin/node\"]}}}\n", "trustedWorkspaces.w.roots[0] expected non-empty string");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"relative\"],\"allowSubdirectories\":true,\"interpreters\":[\"/bin/node\"]}}}\n", "trustedWorkspaces.w.roots[0] expected absolute path");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"/tmp/*\"],\"allowSubdirectories\":true,\"interpreters\":[\"/bin/node\"]}}}\n", "wildcard paths are not supported");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"/tmp\"],\"allowSubdirectories\":true}}}\n", "trustedWorkspaces.w.interpreters expected non-empty array");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"/tmp\"],\"allowSubdirectories\":true,\"interpreters\":[]}}}\n", "trustedWorkspaces.w.interpreters expected non-empty array");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"/tmp\"],\"interpreters\":[\"/bin/node\"]}}}\n", "trustedWorkspaces.w.allowSubdirectories must be boolean");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"/tmp\"],\"allowSubdirectories\":\"yes\",\"interpreters\":[\"/bin/node\"]}}}\n", "trustedWorkspaces.w.allowSubdirectories must be boolean");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"/tmp\"],\"allowSubdirectories\":true,\"interpreters\":[\"node\"]}}}\n", "trustedWorkspaces.w.interpreters[0] expected absolute path");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"/tmp\"],\"allowSubdirectories\":true,\"interpreters\":[\"/bin/node\"],\"allowByCwdOnly\":\"yes\"}}}\n", "trustedWorkspaces.w.allowByCwdOnly must be boolean");
+  assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"/tmp\"],\"allowSubdirectories\":true,\"interpreters\":[\"/bin/node\"],\"hash\":\"no\"}}}\n", "trustedWorkspaces.w.hash unsupported field");
+}
+
+static Config parse_workspace_config(const char *root, const char *interpreter, int allow_subdirs, int allow_by_cwd_only, int add_path_allow, int add_apple){
+  char text[8192];
+  snprintf(text, sizeof(text),
+    "{\n"
+    "  \"version\": 2,\n"
+    "  \"allowAppleSystemComponents\": %s,\n"
+    "  \"trustedWorkspaces\": {\n"
+    "    \"scripts\": {\n"
+    "      \"roots\": [\"%s\"],\n"
+    "      \"allowSubdirectories\": %s,\n"
+    "      \"interpreters\": [\"%s\"]%s%s\n"
+    "    }\n"
+    "  },\n"
+    "  \"allowProcesses\": %s,\n"
+    "  \"allowRemoteHosts\": []\n"
+    "}\n",
+    add_apple ? "true" : "false",
+    root,
+    allow_subdirs ? "true" : "false",
+    interpreter,
+    allow_by_cwd_only ? ",\n      \"allowByCwdOnly\": " : "",
+    allow_by_cwd_only ? "true" : "",
+    add_path_allow ? "{\"node\":\"/tmp/netwatch_placeholder\"}" : "{}");
+  Config cfg = parse_config_ok(text);
+  if (add_path_allow){
+    free(cfg.allow_processes.items[0].paths.items[0]);
+    cfg.allow_processes.items[0].paths.items[0] = xstrdup(interpreter);
+    assert(cfg.allow_processes.items[0].paths.items[0]);
+  }
+  return cfg;
+}
+
+static void test_trusted_workspace_policy(void){
+  char *dir = temp_dir();
+  char *root = join_path_dup(dir, "root");
+  char *sub = join_path_dup(root, "sub");
+  char *outside_dir = join_path_dup(dir, "outside");
+  mkdir_ok(root); mkdir_ok(sub); mkdir_ok(outside_dir);
+  char *interpreter = join_path_dup(dir, "node");
+  char *other_interpreter = join_path_dup(dir, "python");
+  char *script = join_path_dup(root, "job.js");
+  char *sub_script = join_path_dup(sub, "subjob.js");
+  char *outside_script = join_path_dup(outside_dir, "evil.js");
+  char *escape = join_path_dup(root, "escape.js");
+  write_text_mode(interpreter, "#!/bin/sh\n", 0700);
+  write_text_mode(other_interpreter, "#!/bin/sh\n", 0700);
+  write_text_mode(script, "x", 0600);
+  write_text_mode(sub_script, "x", 0600);
+  write_text_mode(outside_script, "x", 0600);
+  assert(symlink(outside_script, escape) == 0);
+
+  Config cfg = parse_workspace_config(root, interpreter, 1, 0, 1, 1);
+  const char *argv_ok[] = { interpreter, script };
+  FakePlatformState state = { .process_cwd = root, .process_argv = argv_ok, .process_argv_count = 2 };
+  NetwatchPlatform platform = fake_platform(&state);
+  ConnectionPolicy policy = connection_policy_for_pid_path_with_platform(
+    "node 42 user TCP 1->2 (ESTABLISHED)", "node", interpreter, 42, &cfg, &platform);
+  assert(policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE);
+  assert(policy.trusted_workspace == TRUSTED_WORKSPACE_OK);
+  assert(!strcmp(policy.matched_workspace, "scripts"));
+
+  const char *argv_sub[] = { interpreter, "subjob.js" };
+  state = (FakePlatformState){ .process_cwd = sub, .process_argv = argv_sub, .process_argv_count = 2 };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_pid_path_with_platform("node 43 user TCP 1->2 (ESTABLISHED)", "node", interpreter, 43, &cfg, &platform);
+  assert(policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE);
+
+  const char *argv_outside[] = { interpreter, outside_script };
+  state = (FakePlatformState){ .process_cwd = root, .process_argv = argv_outside, .process_argv_count = 2 };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_pid_path_with_platform("node 44 user TCP 1->2 (ESTABLISHED)", "node", interpreter, 44, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_workspace == TRUSTED_WORKSPACE_SCRIPT_OUTSIDE_ROOT);
+  assert(!policy.matched_process);
+  assert(state.apple_calls == 0);
+
+  const char *argv_escape[] = { interpreter, escape };
+  state = (FakePlatformState){ .process_cwd = root, .process_argv = argv_escape, .process_argv_count = 2 };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_pid_path_with_platform("node 45 user TCP 1->2 (ESTABLISHED)", "node", interpreter, 45, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_workspace == TRUSTED_WORKSPACE_SCRIPT_OUTSIDE_ROOT);
+
+  state = (FakePlatformState){ .process_path = interpreter, .process_cwd = root, .process_argv = argv_ok, .process_argv_count = 2 };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_pid_path_with_platform("python 46 user TCP 1->2 (ESTABLISHED)", "python", other_interpreter, 46, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(!policy.trusted_workspace_checked);
+  config_free(&cfg);
+
+  cfg = parse_workspace_config(root, interpreter, 0, 0, 0, 0);
+  state = (FakePlatformState){ .process_path = interpreter, .process_cwd = root, .process_argv = argv_ok, .process_argv_count = 2 };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_pid_path_with_platform("node 47 user TCP 1->2 (ESTABLISHED)", "node", interpreter, 47, &cfg, &platform);
+  assert(policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE);
+  state = (FakePlatformState){ .process_cwd = sub, .process_argv = argv_sub, .process_argv_count = 2 };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_pid_path_with_platform("node 48 user TCP 1->2 (ESTABLISHED)", "node", interpreter, 48, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_workspace == TRUSTED_WORKSPACE_CWD_OUTSIDE_ROOT);
+  config_free(&cfg);
+
+  cfg = parse_workspace_config(root, interpreter, 1, 0, 0, 0);
+  const char *argv_no_script[] = { interpreter };
+  state = (FakePlatformState){ .process_cwd = root, .process_argv = argv_no_script, .process_argv_count = 1 };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_pid_path_with_platform("node 49 user TCP 1->2 (ESTABLISHED)", "node", interpreter, 49, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_workspace == TRUSTED_WORKSPACE_SCRIPT_UNAVAILABLE);
+  config_free(&cfg);
+
+  cfg = parse_workspace_config(root, interpreter, 1, 1, 0, 0);
+  state = (FakePlatformState){ .process_cwd = root, .process_argv = argv_no_script, .process_argv_count = 1 };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_pid_path_with_platform("node 50 user TCP 1->2 (ESTABLISHED)", "node", interpreter, 50, &cfg, &platform);
+  assert(policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE);
+  config_free(&cfg);
+
+  cfg = parse_workspace_config(root, interpreter, 1, 0, 0, 0);
+  assert(strlist_push(&cfg.deny_patterns, "node"));
+  state = (FakePlatformState){ .process_path = interpreter, .process_cwd = root, .process_argv = argv_ok, .process_argv_count = 2 };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_pid_path_with_platform("node 51 user TCP 1->2 (ESTABLISHED)", "node", interpreter, 51, &cfg, &platform);
+  assert(policy.decision == CONNECTION_DENIED);
+  assert(state.process_cwd_calls == 0);
+
+  Capture cap = capture_why_platform(&cfg, "51", &platform);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "Decision: DENIED");
+  capture_free(&cap);
+  config_free(&cfg);
+
+  cfg = parse_workspace_config(root, interpreter, 1, 0, 0, 0);
+  state = (FakePlatformState){ .process_path = interpreter, .process_cwd = root, .process_argv = argv_ok, .process_argv_count = 2 };
+  platform = fake_platform(&state);
+  cap = capture_why_platform(&cfg, "52", &platform);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "Decision: ALLOWED");
+  assert_contains(cap.out, "Trust source: TRUSTED_WORKSPACE");
+  assert_contains(cap.out, "interpreter matched trustedWorkspaces.scripts");
+  assert_contains(cap.out, "cwd is inside trusted workspace root");
+  assert_contains(cap.out, "script path is inside trusted workspace root");
+  capture_free(&cap);
+
+  state = (FakePlatformState){ .process_path = interpreter, .process_cwd = root, .process_argv = argv_outside, .process_argv_count = 2 };
+  platform = fake_platform(&state);
+  cap = capture_why_platform(&cfg, "53", &platform);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "Decision: UNKNOWN");
+  assert_contains(cap.out, "script path is outside trusted workspace root");
+  capture_free(&cap);
+  config_free(&cfg);
+
+  unlink(escape); unlink(interpreter); unlink(other_interpreter); unlink(script); unlink(sub_script); unlink(outside_script);
+  rmdir(sub); rmdir(root); rmdir(outside_dir); rmdir(dir);
+  free(root); free(sub); free(outside_dir); free(interpreter); free(other_interpreter);
+  free(script); free(sub_script); free(outside_script); free(escape); free(dir);
+}
+
 static void test_config_conversion(void){
   char *dir = temp_dir();
   char *config = join_path_dup(dir, "config.json");
@@ -875,6 +1126,14 @@ static void test_config_conversion(void){
     "      \"signingIdentifier\": \"com.example.ManualTrusted\"\n"
     "    }\n"
     "  },\n"
+    "  \"trustedWorkspaces\": {\n"
+    "    \"Manual Workspace\": {\n"
+    "      \"roots\": [\"%s\"],\n"
+    "      \"allowSubdirectories\": true,\n"
+    "      \"interpreters\": [\"%s\"],\n"
+    "      \"allowByCwdOnly\": false\n"
+    "    }\n"
+    "  },\n"
     "  \"denyPatterns\": [\"deny-me\"],\n"
     "  \"allowProcesses\": {\n"
     "    \"trustedString\": \"%s\",\n"
@@ -891,7 +1150,7 @@ static void test_config_conversion(void){
     "  },\n"
     "  \"allowRemoteHosts\": []\n"
     "}\n",
-    trusted_string, third, rejected, trusted_array, third, trusted_all);
+    dir, third, trusted_string, third, rejected, trusted_array, third, trusted_all);
   write_text_mode(config, original, 0640);
 
   Capture cap = capture_convert(config);
@@ -911,6 +1170,9 @@ static void test_config_conversion(void){
   assert_contains(converted, "\"Manual Trusted\"");
   assert_contains(converted, "\"TEAMID1234\"");
   assert_contains(converted, "\"com.example.ManualTrusted\"");
+  assert_contains(converted, "\"trustedWorkspaces\"");
+  assert_contains(converted, "\"Manual Workspace\"");
+  assert_contains(converted, "\"allowByCwdOnly\": false");
   assert_contains(converted, third);
   assert_contains(converted, "/usr/libexec/*");
   assert_contains(converted, "/usr/libexec/netwatch_missing_test_binary");
@@ -978,6 +1240,10 @@ static void test_deterministic_json_formatting(void){
     "    \"BetaPub\": {\"teamId\": \"BTEAM\", \"signingIdentifier\": \"com.beta\", \"paths\": [\"/Applications/Beta.app/Contents/MacOS/Beta\"]},\n"
     "    \"AlphaPub\": {\"signingIdentifier\": \"com.alpha\", \"paths\": [\"/Applications/Alpha.app/Contents/MacOS/Alpha\"], \"teamId\": \"ATEAM\"}\n"
     "  },\n"
+    "  \"trustedWorkspaces\": {\n"
+    "    \"BetaWs\": {\"interpreters\": [\"/usr/local/bin/node\"], \"roots\": [\"/Users/serg/beta\"], \"allowSubdirectories\": true},\n"
+    "    \"AlphaWs\": {\"allowSubdirectories\": false, \"roots\": [\"/Users/serg/alpha\"], \"interpreters\": [\"/usr/bin/python3\"]}\n"
+    "  },\n"
     "  \"allowProcesses\": {\n"
     "    \"Beta\": \"/Applications/Beta.app/Contents/*\",\n"
     "    \"Alpha\": [\"array-second\", \"array-first\"]\n"
@@ -997,6 +1263,10 @@ static void test_deterministic_json_formatting(void){
     "  \"trustedPublishers\": {\n"
     "    \"AlphaPub\": {\"teamId\": \"ATEAM\", \"paths\": [\"/Applications/Alpha.app/Contents/MacOS/Alpha\"], \"signingIdentifier\": \"com.alpha\"},\n"
     "    \"BetaPub\": {\"paths\": [\"/Applications/Beta.app/Contents/MacOS/Beta\"], \"signingIdentifier\": \"com.beta\", \"teamId\": \"BTEAM\"}\n"
+    "  },\n"
+    "  \"trustedWorkspaces\": {\n"
+    "    \"AlphaWs\": {\"interpreters\": [\"/usr/bin/python3\"], \"allowSubdirectories\": false, \"roots\": [\"/Users/serg/alpha\"]},\n"
+    "    \"BetaWs\": {\"allowSubdirectories\": true, \"roots\": [\"/Users/serg/beta\"], \"interpreters\": [\"/usr/local/bin/node\"]}\n"
     "  },\n"
     "  \"zUnknown\": {\"alpha\": true, \"beta\": false}\n"
     "}\n";
@@ -1018,9 +1288,11 @@ static void test_deterministic_json_formatting(void){
   assert_before(out_a, "\"version\"", "\"dryRun\"");
   assert_before(out_a, "\"dryRun\"", "\"allowAppleSystemComponents\"");
   assert_before(out_a, "\"allowAppleSystemComponents\"", "\"trustedPublishers\"");
-  assert_before(out_a, "\"trustedPublishers\"", "\"denyPatterns\"");
+  assert_before(out_a, "\"trustedPublishers\"", "\"trustedWorkspaces\"");
+  assert_before(out_a, "\"trustedWorkspaces\"", "\"denyPatterns\"");
   assert_before(out_a, "\"Alpha\"", "\"Beta\"");
   assert_before(out_a, "\"AlphaPub\"", "\"BetaPub\"");
+  assert_before(out_a, "\"AlphaWs\"", "\"BetaWs\"");
   assert_before(out_a, "\"alpha\"", "\"beta\"");
   assert_before(out_a, "\"array-second\"", "\"array-first\"");
   assert_before(out_a, "\"2\"", "\"1\"");
@@ -1147,6 +1419,15 @@ static void test_check_config(void){
   assert_contains(cap.out, "executable does not currently exist");
   assert_contains(cap.out, "Apple trust verification did not pass");
   assert_contains(cap.out, "shadowed by deny pattern: shadow");
+  capture_free(&cap);
+
+  write_text_mode(config,
+    "{\"version\":2,\"trustedWorkspaces\":{\"Missing Workspace\":{\"roots\":[\"/tmp/netwatch_missing_workspace_root\"],\"allowSubdirectories\":true,\"interpreters\":[\"/tmp/netwatch_missing_workspace_node\"]}},\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n",
+    0600);
+  cap = capture_check(config);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "workspace root does not currently exist");
+  assert_contains(cap.out, "interpreter does not currently exist");
   capture_free(&cap);
 
   char *publisher_exe = join_path_dup(dir, "publisher");
@@ -1529,13 +1810,23 @@ static void test_cli_dry_run_mode(void){
 static void test_audit_mode(void){
   char *dir = temp_dir();
   char *config = join_path_dup(dir, "config.json");
-  write_text_mode(config,
-    "{\"version\":2,\"dryRun\":false,\"allowAppleSystemComponents\":true,\"denyPatterns\":[\"BlockedProc\"],\"trustedPublishers\":{\"PublisherProc\":{\"paths\":[\"/Applications/Publisher.app/Contents/MacOS/Publisher\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"allowProcesses\":{\"AllowedProc\":\"/Applications/Allowed.app/Contents/MacOS/Allowed\"},\"allowRemoteHosts\":[]}\n",
+  char *workspace_root = join_path_dup(dir, "workspace");
+  mkdir_ok(workspace_root);
+  char *workspace_interpreter = join_path_dup(dir, "node");
+  char *workspace_script = join_path_dup(workspace_root, "job.js");
+  write_text_mode(workspace_interpreter, "#!/bin/sh\n", 0700);
+  write_text_mode(workspace_script, "x", 0600);
+  char audit_config[4096];
+  snprintf(audit_config, sizeof(audit_config),
+    "{\"version\":2,\"dryRun\":false,\"allowAppleSystemComponents\":true,\"denyPatterns\":[\"BlockedProc\"],\"trustedPublishers\":{\"PublisherProc\":{\"paths\":[\"/Applications/Publisher.app/Contents/MacOS/Publisher\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"trustedWorkspaces\":{\"WorkspaceProc\":{\"roots\":[\"%s\"],\"allowSubdirectories\":true,\"interpreters\":[\"%s\"]}},\"allowProcesses\":{\"AllowedProc\":\"/Applications/Allowed.app/Contents/MacOS/Allowed\"},\"allowRemoteHosts\":[]}\n",
+    workspace_root, workspace_interpreter);
+  write_text_mode(config, audit_config,
     0600);
 
   const char *connections[] = {
     "TrustedProc 11 user 10u IPv4 TCP 10.0.0.1:1->203.0.113.1:443 (ESTABLISHED)",
     "PublisherProc 17 user 10u IPv4 TCP 10.0.0.1:7->203.0.113.7:443 (ESTABLISHED)",
+    "WorkspaceProc 18 user 10u IPv4 TCP 10.0.0.1:8->203.0.113.8:443 (ESTABLISHED)",
     "AllowedProc 12 user 10u IPv4 TCP 10.0.0.1:2->203.0.113.2:443 (ESTABLISHED)",
     "BlockedProc 13 user 10u IPv4 TCP 10.0.0.1:3->203.0.113.3:443 (ESTABLISHED)",
     "UnknownProc 14 user 10u IPv4 TCP 10.0.0.1:4->203.0.113.4:443 (ESTABLISHED)",
@@ -1546,6 +1837,7 @@ static void test_audit_mode(void){
   const char *paths[] = {
     "/usr/libexec/trusted_audit_fixture",
     "/Applications/Publisher.app/Contents/MacOS/Publisher",
+    workspace_interpreter,
     "/Applications/Allowed.app/Contents/MacOS/Allowed",
     "/opt/blocked",
     "/opt/netwatch_unknown",
@@ -1557,22 +1849,27 @@ static void test_audit_mode(void){
     .connection_count = sizeof(connections) / sizeof(*connections),
     .process_paths = paths,
     .process_path_count = sizeof(paths) / sizeof(*paths),
+    .process_cwd = workspace_root,
+    .process_argv = (const char *[]){ workspace_interpreter, workspace_script },
+    .process_argv_count = 2,
     .now_value = 1700000000
   };
   NetwatchPlatform platform = fake_platform(&state);
   Capture cap = capture_audit(config, 0, &platform);
   assert(cap.rc == 0);
   assert(state.collect_calls == 1);
-  assert(state.process_path_calls == 7);
+  assert(state.process_path_calls == 8);
   assert(state.wifi_calls == 0);
   assert_contains(cap.out, "Audit report");
   assert_contains(cap.out, "Runtime seconds: 0");
-  assert_contains(cap.out, "Connections scanned: 8");
-  assert_contains(cap.out, "Unique executable paths: 6");
+  assert_contains(cap.out, "Connections scanned: 9");
+  assert_contains(cap.out, "Unique executable paths: 7");
   assert_contains(cap.out, "APPLE SYSTEM");
   assert_contains(cap.out, "/usr/libexec/trusted_audit_fixture");
   assert_contains(cap.out, "TRUSTED PUBLISHER");
   assert_contains(cap.out, "/Applications/Publisher.app/Contents/MacOS/Publisher");
+  assert_contains(cap.out, "TRUSTED WORKSPACE");
+  assert_contains(cap.out, workspace_interpreter);
   assert_contains(cap.out, "ALLOWED");
   assert_contains(cap.out, "/Applications/Allowed.app/Contents/MacOS/Allowed");
   assert_contains(cap.out, "DENIED");
@@ -1585,12 +1882,14 @@ static void test_audit_mode(void){
   assert_contains(cap.out, "\"/opt/netwatch_unknown\"");
   assert_not_contains(cap.out, "\"TrustedProc\":");
   assert_not_contains(cap.out, "\"PublisherProc\":");
+  assert_not_contains(cap.out, "\"WorkspaceProc\":");
   assert_not_contains(cap.out, "\"BlockedProc\":");
   assert_not_contains(cap.out, "\"MaybeProc\":");
   capture_free(&cap);
 
-  unlink(config); rmdir(dir);
-  free(config); free(dir);
+  unlink(config); unlink(workspace_interpreter); unlink(workspace_script);
+  rmdir(workspace_root); rmdir(dir);
+  free(config); free(workspace_root); free(workspace_interpreter); free(workspace_script); free(dir);
 }
 
 static void test_audit_duration(void){
@@ -1656,15 +1955,22 @@ static void test_monitor_stats(void){
   char *dir = temp_dir();
   char *config = join_path_dup(dir, "config.json");
   char *log = join_path_dup(dir, "netwatch.log");
-  char config_text[2048];
+  char *workspace_root = join_path_dup(dir, "workspace");
+  mkdir_ok(workspace_root);
+  char *workspace_interpreter = join_path_dup(dir, "node");
+  char *workspace_script = join_path_dup(workspace_root, "job.js");
+  write_text_mode(workspace_interpreter, "#!/bin/sh\n", 0700);
+  write_text_mode(workspace_script, "x", 0600);
+  char config_text[4096];
   snprintf(config_text, sizeof(config_text),
-    "{\"version\":2,\"dryRun\":false,\"allowAppleSystemComponents\":true,\"logPath\":\"%s\",\"denyPatterns\":[\"BlockedProc\"],\"trustedPublishers\":{\"PublisherProc\":{\"paths\":[\"/Applications/Publisher.app/Contents/MacOS/Publisher\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"allowProcesses\":{\"AllowedProc\":\"/Applications/Allowed.app/Contents/MacOS/Allowed\"},\"allowRemoteHosts\":[]}\n",
-    log);
+    "{\"version\":2,\"dryRun\":false,\"allowAppleSystemComponents\":true,\"logPath\":\"%s\",\"denyPatterns\":[\"BlockedProc\"],\"trustedPublishers\":{\"PublisherProc\":{\"paths\":[\"/Applications/Publisher.app/Contents/MacOS/Publisher\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"trustedWorkspaces\":{\"WorkspaceProc\":{\"roots\":[\"%s\"],\"allowSubdirectories\":true,\"interpreters\":[\"%s\"]}},\"allowProcesses\":{\"AllowedProc\":\"/Applications/Allowed.app/Contents/MacOS/Allowed\"},\"allowRemoteHosts\":[]}\n",
+    log, workspace_root, workspace_interpreter);
   write_text_mode(config, config_text, 0600);
 
   const char *connections[] = {
     "TrustedProc 11 user 10u IPv4 TCP 10.0.0.1:1->203.0.113.1:443 (ESTABLISHED)",
     "PublisherProc 15 user 10u IPv4 TCP 10.0.0.1:5->203.0.113.5:443 (ESTABLISHED)",
+    "WorkspaceProc 16 user 10u IPv4 TCP 10.0.0.1:6->203.0.113.6:443 (ESTABLISHED)",
     "AllowedProc 12 user 10u IPv4 TCP 10.0.0.1:2->203.0.113.2:443 (ESTABLISHED)",
     "BlockedProc 13 user 10u IPv4 TCP 10.0.0.1:3->203.0.113.3:443 (ESTABLISHED)",
     "UnknownProc 14 user 10u IPv4 TCP 10.0.0.1:4->203.0.113.4:443 (ESTABLISHED)",
@@ -1673,6 +1979,7 @@ static void test_monitor_stats(void){
   const char *paths[] = {
     "/usr/libexec/trusted_stats_fixture",
     "/Applications/Publisher.app/Contents/MacOS/Publisher",
+    workspace_interpreter,
     "/Applications/Allowed.app/Contents/MacOS/Allowed",
     "/opt/stats_blocked",
     "/opt/stats_unknown"
@@ -1682,20 +1989,24 @@ static void test_monitor_stats(void){
     .connection_count = sizeof(connections) / sizeof(*connections),
     .process_paths = paths,
     .process_path_count = sizeof(paths) / sizeof(*paths),
+    .process_cwd = workspace_root,
+    .process_argv = (const char *[]){ workspace_interpreter, workspace_script },
+    .process_argv_count = 2,
     .now_value = 1700000000
   };
   NetwatchPlatform platform = fake_platform(&state);
   MonitorStats stats = { .connections_scanned = 999 };
   assert(monitor_run_with_stats(config, false, &stats, &platform) == 0);
   assert(state.collect_calls == 1);
-  assert(state.process_path_calls == 5);
+  assert(state.process_path_calls == 6);
   assert(state.wifi_calls == 1);
   assert(stats.scan_cycles == 1);
-  assert(stats.connections_scanned == 6);
-  assert(stats.unique_processes == 5);
-  assert(stats.unique_executable_paths == 5);
+  assert(stats.connections_scanned == 7);
+  assert(stats.unique_processes == 6);
+  assert(stats.unique_executable_paths == 6);
   assert(stats.apple_trusted_decisions == 1);
   assert(stats.trusted_publisher_matches == 1);
+  assert(stats.trusted_workspace_matches == 1);
   assert(stats.explicit_allow_matches == 1);
   assert(stats.deny_matches == 1);
   assert(stats.unknown_decisions == 2);
@@ -1705,6 +2016,8 @@ static void test_monitor_stats(void){
   char *log_text = must_read(log);
   assert_contains(log_text, "[TRUSTED_PUBLISHER]");
   assert_contains(log_text, "PUBLISHER RULE: PublisherProc");
+  assert_contains(log_text, "[TRUSTED_WORKSPACE]");
+  assert_contains(log_text, "WORKSPACE RULE: WorkspaceProc");
   free(log_text);
 
   snprintf(config_text, sizeof(config_text),
@@ -1752,8 +2065,9 @@ static void test_monitor_stats(void){
   assert(stats.failed_wifi_disable_actions == 1);
   capture_free(&cap);
 
-  unlink(config); unlink(log); rmdir(dir);
-  free(config); free(log); free(dir);
+  unlink(config); unlink(log); unlink(workspace_interpreter); unlink(workspace_script);
+  rmdir(workspace_root); rmdir(dir);
+  free(config); free(log); free(workspace_root); free(workspace_interpreter); free(workspace_script); free(dir);
 }
 
 static void test_cli_stats_mode(void){
@@ -1819,7 +2133,7 @@ static void test_status_command(void){
 
   write_text_mode(bin, "#!/bin/sh\n", 0755);
   write_text_mode(config,
-    "{\"version\":2,\"dryRun\":true,\"allowAppleSystemComponents\":true,\"trustedPublishers\":{\"Status Publisher\":{\"paths\":[\"/Applications/Status.app/Contents/MacOS/Status\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.Status\"}},\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n",
+    "{\"version\":2,\"dryRun\":true,\"allowAppleSystemComponents\":true,\"trustedPublishers\":{\"Status Publisher\":{\"paths\":[\"/Applications/Status.app/Contents/MacOS/Status\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.Status\"}},\"trustedWorkspaces\":{\"Status Workspace\":{\"roots\":[\"/tmp\"],\"allowSubdirectories\":true,\"interpreters\":[\"/bin/sh\"]}},\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n",
     0600);
   write_text_mode(plist, "<plist><string>/tmp/netwatch</string></plist>\n", 0600);
   write_text_mode(err_log, "old startup line\nlatest startup line\n", 0600);
@@ -1848,6 +2162,7 @@ static void test_status_command(void){
   assert_contains(cap.out, "Config version: 2");
   assert_contains(cap.out, "Apple system trust: enabled");
   assert_contains(cap.out, "Trusted publisher rules: 1");
+  assert_contains(cap.out, "Trusted workspace rules: 1");
   assert_contains(cap.out, "Dry run: enabled");
   assert_contains(cap.out, "Audit mode: not configured");
   assert_contains(cap.out, "Recent startup error: latest startup line");
@@ -1876,6 +2191,7 @@ static void test_status_missing_and_partial(void){
   assert_contains(cap.out, "Config version: unavailable");
   assert_contains(cap.out, "Apple system trust: unavailable");
   assert_contains(cap.out, "Trusted publisher rules: unavailable");
+  assert_contains(cap.out, "Trusted workspace rules: unavailable");
   assert_contains(cap.out, "Dry run: unavailable");
   assert_contains(cap.out, "Audit mode: unavailable (LaunchAgent not installed)");
   assert_contains(cap.out, "Recent startup error: unavailable (stderr log not found)");
@@ -1910,6 +2226,7 @@ static void test_status_missing_and_partial(void){
   assert_contains(cap.out, "Config valid: no");
   assert_contains(cap.out, "Unsupported config version: 3");
   assert_contains(cap.out, "Trusted publisher rules: unavailable");
+  assert_contains(cap.out, "Trusted workspace rules: unavailable");
   assert_contains(cap.out, "Audit mode: configured");
   assert_contains(cap.out, "Recent startup error: none detected");
   capture_free(&cap);
@@ -1956,6 +2273,7 @@ static void test_cli_status_mode(void){
   assert_contains(cli_out, "Service loaded: no");
   assert_contains(cli_out, "Config valid: yes");
   assert_contains(cli_out, "Trusted publisher rules: 0");
+  assert_contains(cli_out, "Trusted workspace rules: 0");
   free(cli_out);
   assert(run_netwatch_mode_cwd("--status", "extra", NULL, path_env, out, dir) != 0);
 
@@ -1996,6 +2314,8 @@ int main(void){
   test_temp_executable_rejected();
   test_config_bool();
   test_config_trusted_publishers();
+  test_config_trusted_workspaces();
+  test_trusted_workspace_policy();
   test_config_conversion();
   test_backup_suffix();
   test_deterministic_json_formatting();

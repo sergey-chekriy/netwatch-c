@@ -23,6 +23,7 @@ void config_free(Config *cfg){
   strlist_free(&cfg->allow_remote_hosts);
   process_rules_free(&cfg->allow_processes);
   trusted_publisher_rules_free(&cfg->trusted_publishers);
+  trusted_workspace_rules_free(&cfg->trusted_workspaces);
   *cfg = (Config){0};
 }
 
@@ -188,6 +189,95 @@ static int parse_trusted_publishers(cJSON *json, TrustedPublisherRules *out, cha
   return 1;
 }
 
+static int known_trusted_workspace_field(const char *field){
+  static const char *known[] = { "roots", "allowSubdirectories", "interpreters", "allowByCwdOnly" };
+  for (size_t i = 0; i < sizeof(known) / sizeof(*known); i++) if (field && !strcmp(field, known[i])) return 1;
+  return 0;
+}
+
+static int parse_trusted_workspace_path_array(cJSON *json, StrList *out, const char *where, char *err, size_t err_len){
+  if (!cJSON_IsArray(json) || cJSON_GetArraySize(json) <= 0){
+    set_error(err, err_len, "%s expected non-empty array of absolute paths", where);
+    return 0;
+  }
+  int index = 0;
+  cJSON *path = NULL;
+  cJSON_ArrayForEach(path, json){
+    char item_where[256]; snprintf(item_where, sizeof(item_where), "%s[%d]", where, index++);
+    if (!cJSON_IsString(path) || !path->valuestring || !path->valuestring[0]){
+      set_error(err, err_len, "%s expected non-empty string", item_where);
+      return 0;
+    }
+    if (path->valuestring[0] != '/'){
+      set_error(err, err_len, "%s expected absolute path", item_where);
+      return 0;
+    }
+    if (strchr(path->valuestring, '*')){
+      set_error(err, err_len, "%s wildcard paths are not supported for trusted workspace rules", item_where);
+      return 0;
+    }
+    if (!strlist_push(out, path->valuestring)){
+      set_error(err, err_len, "out of memory parsing %s", item_where);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int parse_trusted_workspace_rule(cJSON *item, TrustedWorkspaceRules *out, char *err, size_t err_len){
+  if (!item->string || !item->string[0]){
+    set_error(err, err_len, "trustedWorkspaces entries must have non-empty names");
+    return 0;
+  }
+  char where[256]; snprintf(where, sizeof(where), "trustedWorkspaces.%s", item->string);
+  if (!cJSON_IsObject(item)){ set_error(err, err_len, "%s must be an object", where); return 0; }
+  for (cJSON *field = item->child; field; field = field->next){
+    if (!known_trusted_workspace_field(field->string)){
+      set_error(err, err_len, "%s.%s unsupported field", where, field->string ? field->string : "(unknown)");
+      return 0;
+    }
+  }
+
+  StrList roots = {0}, interpreters = {0};
+  bool allow_subdirectories = false, allow_by_cwd_only = false;
+  snprintf(where, sizeof(where), "trustedWorkspaces.%s.roots", item->string);
+  if (!parse_trusted_workspace_path_array(cJSON_GetObjectItemCaseSensitive(item, "roots"), &roots, where, err, err_len)) goto fail;
+  snprintf(where, sizeof(where), "trustedWorkspaces.%s.interpreters", item->string);
+  if (!parse_trusted_workspace_path_array(cJSON_GetObjectItemCaseSensitive(item, "interpreters"), &interpreters, where, err, err_len)) goto fail;
+
+  snprintf(where, sizeof(where), "trustedWorkspaces.%s.allowSubdirectories", item->string);
+  cJSON *allow_subdirs = cJSON_GetObjectItemCaseSensitive(item, "allowSubdirectories");
+  if (!cJSON_IsBool(allow_subdirs)){ set_error(err, err_len, "%s must be boolean", where); goto fail; }
+  allow_subdirectories = cJSON_IsTrue(allow_subdirs);
+
+  cJSON *cwd_only = cJSON_GetObjectItemCaseSensitive(item, "allowByCwdOnly");
+  if (cwd_only){
+    snprintf(where, sizeof(where), "trustedWorkspaces.%s.allowByCwdOnly", item->string);
+    if (!cJSON_IsBool(cwd_only)){ set_error(err, err_len, "%s must be boolean", where); goto fail; }
+    allow_by_cwd_only = cJSON_IsTrue(cwd_only);
+  }
+
+  if (!trusted_workspace_rules_push(out, item->string, &roots, allow_subdirectories, &interpreters, allow_by_cwd_only)){
+    set_error(err, err_len, "out of memory parsing trustedWorkspaces");
+    goto fail;
+  }
+  return 1;
+
+fail:
+  strlist_free(&roots);
+  strlist_free(&interpreters);
+  return 0;
+}
+
+static int parse_trusted_workspaces(cJSON *json, TrustedWorkspaceRules *out, char *err, size_t err_len){
+  if (!json) return 1;
+  if (!cJSON_IsObject(json)){ set_error(err, err_len, "trustedWorkspaces must be an object"); return 0; }
+  for (cJSON *item = json->child; item; item = item->next){
+    if (!parse_trusted_workspace_rule(item, out, err, err_len)) return 0;
+  }
+  return 1;
+}
+
 static int parse_version(cJSON *json, char *err, size_t err_len){
   if (!json) return 1;
   if (!cJSON_IsNumber(json)){
@@ -230,7 +320,8 @@ int config_parse_text(Config *cfg, const char *text, const char *source, char *e
     && parse_string_array(cJSON_GetObjectItemCaseSensitive(root, "denyPatterns"), &cfg->deny_patterns, "denyPatterns", err, err_len)
     && parse_string_array(cJSON_GetObjectItemCaseSensitive(root, "allowRemoteHosts"), &cfg->allow_remote_hosts, "allowRemoteHosts", err, err_len)
     && parse_allow_processes(cJSON_GetObjectItemCaseSensitive(root, "allowProcesses"), &cfg->allow_processes, err, err_len)
-    && parse_trusted_publishers(cJSON_GetObjectItemCaseSensitive(root, "trustedPublishers"), &cfg->trusted_publishers, err, err_len);
+    && parse_trusted_publishers(cJSON_GetObjectItemCaseSensitive(root, "trustedPublishers"), &cfg->trusted_publishers, err, err_len)
+    && parse_trusted_workspaces(cJSON_GetObjectItemCaseSensitive(root, "trustedWorkspaces"), &cfg->trusted_workspaces, err, err_len);
   cJSON_Delete(root);
   if (!ok) config_free(cfg);
   return ok;

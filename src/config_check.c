@@ -229,6 +229,23 @@ static int warn_trusted_publishers(const Config *cfg, const NetwatchPlatform *pl
   return 1;
 }
 
+static int warn_trusted_workspaces(const Config *cfg, const NetwatchPlatform *platform, CheckIssues *warnings){
+  for (size_t i = 0; i < cfg->trusted_workspaces.len; i++){
+    const TrustedWorkspaceRule *rule = &cfg->trusted_workspaces.items[i];
+    for (size_t j = 0; j < rule->roots.len; j++){
+      char where[256]; snprintf(where, sizeof(where), "trustedWorkspaces.%s.roots[%zu]", rule->name, j);
+      if (platform->access_path(platform, rule->roots.items[j], F_OK) != 0
+        && !issues_push(warnings, where, "workspace root does not currently exist: %s", rule->roots.items[j])) return 0;
+    }
+    for (size_t j = 0; j < rule->interpreters.len; j++){
+      char where[256]; snprintf(where, sizeof(where), "trustedWorkspaces.%s.interpreters[%zu]", rule->name, j);
+      if (platform->access_path(platform, rule->interpreters.items[j], F_OK) != 0
+        && !issues_push(warnings, where, "interpreter does not currently exist: %s", rule->interpreters.items[j])) return 0;
+    }
+  }
+  return 1;
+}
+
 static int warn_shadowed_by_deny(cJSON *root, CheckIssues *warnings){
   cJSON *deny = cJSON_GetObjectItemCaseSensitive(root, "denyPatterns");
   cJSON *allow = cJSON_GetObjectItemCaseSensitive(root, "allowProcesses");
@@ -265,6 +282,7 @@ static int collect_warnings(cJSON *root, const Config *cfg, const NetwatchPlatfo
     && warn_allow_paths(allow, cfg, platform, verifier, warnings)
     && warn_duplicate_trusted_publisher_paths(cfg, warnings)
     && warn_trusted_publishers(cfg, platform, warnings)
+    && warn_trusted_workspaces(cfg, platform, warnings)
     && warn_shadowed_by_deny(root, warnings);
 }
 

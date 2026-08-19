@@ -3,6 +3,7 @@
   "dryRun": true,
   "allowAppleSystemComponents": true,
   "trustedPublishers": {},
+  "trustedWorkspaces": {},
   "interface": "Wi-Fi",
   "denyPatterns": [
     "144.172.104.196",

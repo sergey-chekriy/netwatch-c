@@ -96,7 +96,7 @@ static int audit_scan_once(AuditReport *report, const Config *cfg, PathCache *ca
     int pid = 0;
     char *path = pid_of(connections.items[i], &pid) ? process_path_cached_with_platform(cache, pid, proc_copy, platform) : xstrdup("unknown");
     if (!path){ strlist_free(&connections); set_error(err, err_len, "out of memory resolving process path"); return 0; }
-    ConnectionPolicy policy = connection_policy_for_path_with_platform(connections.items[i], proc_copy, path_known(path) ? path : NULL, cfg, platform);
+    ConnectionPolicy policy = connection_policy_for_pid_path_with_platform(connections.items[i], proc_copy, path_known(path) ? path : NULL, pid, cfg, platform);
     report->connections_scanned++;
     int ok = add_observation(report, proc_copy, path_known(path) ? path : "unknown", policy.decision);
     free(path);
@@ -139,6 +139,7 @@ static void print_report(const AuditReport *report){
   printf("Unique executable paths: %zu\n", unique_path_count(report));
   print_section(report, "APPLE SYSTEM", CONNECTION_ALLOWED_APPLE_SYSTEM);
   print_section(report, "TRUSTED PUBLISHER", CONNECTION_ALLOWED_TRUSTED_PUBLISHER);
+  print_section(report, "TRUSTED WORKSPACE", CONNECTION_ALLOWED_TRUSTED_WORKSPACE);
   print_section(report, "ALLOWED", CONNECTION_ALLOWED_CONFIG);
   print_section(report, "DENIED", CONNECTION_DENIED);
   print_section(report, "UNKNOWN", CONNECTION_UNKNOWN);

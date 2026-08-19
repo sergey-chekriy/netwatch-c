@@ -13,7 +13,7 @@
 #define DEFAULT_CONFIG_PATH "./netwatch.config.json"
 
 static void print_usage(const char *argv0){
-  fprintf(stderr, "Usage: %s [config.json]\n       %s --dry-run [config.json]\n       %s --stats [config.json]\n       %s --audit [seconds]\n       %s --status\n       %s --convert-config <config.json>\n       %s --check-config <config.json>\n       %s --why <executable-path>\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+  fprintf(stderr, "Usage: %s [config.json]\n       %s --dry-run [config.json]\n       %s --stats [config.json]\n       %s --audit [seconds]\n       %s --status\n       %s --convert-config <config.json>\n       %s --check-config <config.json>\n       %s --why <pid-or-executable-path>\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static int parse_duration(const char *text, int *out){

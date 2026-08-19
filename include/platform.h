@@ -24,6 +24,10 @@ struct NetwatchPlatform {
   void (*fsync_parent_dir)(const NetwatchPlatform *platform, const char *path);
   int (*collect_connections)(const NetwatchPlatform *platform, StrList *connections, char *err, size_t err_len);
   char *(*process_path)(const NetwatchPlatform *platform, int pid, const char *proc_name);
+  char *(*process_cwd)(const NetwatchPlatform *platform, int pid);
+  int (*process_argv)(const NetwatchPlatform *platform, int pid, StrList *argv, char *err, size_t err_len);
+  int (*process_parent_pid)(const NetwatchPlatform *platform, int pid, int *ppid);
+  char *(*process_command_line)(const NetwatchPlatform *platform, int pid);
   AppleTrustResult (*apple_trust_check)(const NetwatchPlatform *platform, const char *path, char *reason, size_t reason_size);
   CodeSignatureIdentityResult (*code_signature_identity)(const NetwatchPlatform *platform, const char *path, CodeSignatureIdentity *identity, char *err, size_t err_len);
   int (*disable_wifi)(const NetwatchPlatform *platform, const char *interface, char *err, size_t err_len);

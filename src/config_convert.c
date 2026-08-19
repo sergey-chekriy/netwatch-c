@@ -98,6 +98,7 @@ static int top_level_key_rank(const char *key){
     "dryRun",
     "allowAppleSystemComponents",
     "trustedPublishers",
+    "trustedWorkspaces",
     "interface",
     "logPath",
     "denyPatterns",
