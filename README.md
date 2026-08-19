@@ -415,6 +415,78 @@ Suggested allow entries (review before adding):
   "/opt/homebrew/bin/python3"
 ```
 
+## Configuration backend commands
+
+These commands are intended for scripts, a future interactive configurator, and the macOS GUI. They do not start monitoring unless explicitly noted.
+
+Discover installed `.app` bundles:
+
+```bash
+./netwatch --discover-apps --json
+```
+
+The JSON contains one item per discovered app with `displayName`, `bundlePath`, `executablePath`, `teamId`, `signingIdentifier`, `signatureValid`, `appleSigned`, and `suitableTrustedPublisher`. Discovery scans `/Applications`, `/System/Applications`, and `~/Applications`. It never adds rules automatically.
+
+Show a config in deterministic format:
+
+```bash
+./netwatch --config-show --config /path/to/netwatch.config.json
+```
+
+Edit selected config fields:
+
+```bash
+./netwatch --config-set-dry-run true --config /path/to/netwatch.config.json
+./netwatch --config-set-dry-run false --config /path/to/netwatch.config.json
+./netwatch --config-set-poll-interval 300 --config /path/to/netwatch.config.json
+```
+
+Add or remove trusted publisher rules:
+
+```bash
+./netwatch --config-add-trusted-publisher "Google Chrome" \
+  --path "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+  --team-id "EXPECTED_TEAM_ID" \
+  --signing-identifier "com.google.Chrome" \
+  --config /path/to/netwatch.config.json
+
+./netwatch --config-remove-trusted-publisher "Google Chrome" \
+  --config /path/to/netwatch.config.json
+```
+
+Adding a trusted publisher requires the executable to exist and its current Security.framework identity to match the provided Team ID and signing identifier. The command does not infer or invent identity values.
+
+Add or remove trusted workspace rules:
+
+```bash
+./netwatch --config-add-trusted-workspace "project scripts" \
+  --root "/Users/serg/project" \
+  --interpreter "/usr/local/bin/node" \
+  --config /path/to/netwatch.config.json
+
+./netwatch --config-remove-trusted-workspace "project scripts" \
+  --config /path/to/netwatch.config.json
+```
+
+Workspace additions require an existing directory root and an existing executable interpreter. Added rules default to `allowSubdirectories=true` and `allowByCwdOnly=false`.
+
+Config editing commands validate the existing config, modify only the requested field, validate the updated config, create a backup, write a same-directory temporary file, flush it, atomically replace the original with `rename()`, and preserve unrelated fields. Output uses the same deterministic JSON formatting as config conversion. Repeated config backend edits use the first available backup name from `config.json.bak` through `config.json.bak.999`.
+
+Reload a running daemon after edits:
+
+```bash
+./netwatch --reload-daemon
+```
+
+This sends the existing daemon reload signal and does not start or stop the daemon. If the daemon is not running, it exits non-zero with a clear error.
+
+Recommended workflow:
+
+1. `./netwatch --discover-apps --json`
+2. Add one reviewed trusted publisher or trusted workspace rule.
+3. `./netwatch --check-config /path/to/netwatch.config.json`
+4. `./netwatch --reload-daemon`
+
 ## Convert an existing config
 
 To migrate an existing config to automatic Apple system-component trust:

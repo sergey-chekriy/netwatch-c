@@ -10,7 +10,7 @@ LDLIBS ?= -framework Security -framework CoreFoundation
 SRC := $(wildcard src/*.c) third_party/cjson/cJSON.c
 OBJ := $(SRC:.c=.o)
 TEST_APP := tests/netwatch_tests
-TEST_SRC := tests/netwatch_tests.c src/allow.c src/apple_trust.c src/audit.c src/config.c src/config_check.c src/config_convert.c src/daemon.c src/logging.c src/monitor.c src/platform.c src/process.c src/status.c src/status_snapshot.c src/strlist.c src/trusted_publisher.c src/trusted_workspace.c src/util.c src/wifi.c src/why.c third_party/cjson/cJSON.c
+TEST_SRC := tests/netwatch_tests.c src/allow.c src/apple_trust.c src/app_discovery.c src/audit.c src/config.c src/config_backend.c src/config_check.c src/config_convert.c src/daemon.c src/logging.c src/monitor.c src/platform.c src/process.c src/status.c src/status_snapshot.c src/strlist.c src/trusted_publisher.c src/trusted_workspace.c src/util.c src/wifi.c src/why.c third_party/cjson/cJSON.c
 PREFIX ?= $(HOME)/.watch
 
 .PHONY: all clean install uninstall run test statusbar install-statusbar

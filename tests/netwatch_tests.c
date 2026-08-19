@@ -1,7 +1,9 @@
 #include "allow.h"
 #include "apple_trust.h"
+#include "app_discovery.h"
 #include "audit.h"
 #include "config.h"
+#include "config_backend.h"
 #include "config_check.h"
 #include "config_convert.h"
 #include "daemon.h"
@@ -161,6 +163,8 @@ typedef struct {
   unsigned int slept_seconds;
   int launchd_calls;
   int launchd_loaded_result;
+  int reload_daemon_calls;
+  int reload_daemon_result;
   int find_process_calls;
   int write_temp_file_calls;
   int not_scanned_status_after_scan;
@@ -297,6 +301,15 @@ static int fake_platform_launchd_loaded(const NetwatchPlatform *platform, const 
   return state->launchd_loaded_result;
 }
 
+static int fake_platform_reload_daemon(const NetwatchPlatform *platform, const char *label, char *err, size_t err_len){
+  (void)label;
+  FakePlatformState *state = platform->ctx;
+  state->reload_daemon_calls++;
+  if (state->reload_daemon_result) return 1;
+  set_error(err, err_len, "fake daemon is not running");
+  return 0;
+}
+
 static int fake_platform_find_process(const NetwatchPlatform *platform, const char *expected_path, int *pid, char *path, size_t path_size){
   (void)expected_path;
   FakePlatformState *state = platform->ctx;
@@ -345,8 +358,33 @@ static NetwatchPlatform fake_platform(FakePlatformState *state){
   platform.daemon_should_stop = fake_platform_daemon_should_stop;
   platform.daemon_should_reload = fake_platform_daemon_should_reload;
   platform.launchd_service_loaded = fake_platform_launchd_loaded;
+  platform.reload_daemon = fake_platform_reload_daemon;
   platform.find_process_by_executable = fake_platform_find_process;
   return platform;
+}
+
+typedef int (*CapturedCall)(void *ctx);
+
+static Capture capture_call(CapturedCall call, void *ctx){
+  char out_path[] = "/tmp/netwatch_call_out_XXXXXX";
+  char err_path[] = "/tmp/netwatch_call_err_XXXXXX";
+  int out_fd = mkstemp(out_path), err_fd = mkstemp(err_path);
+  assert(out_fd >= 0 && err_fd >= 0);
+
+  fflush(NULL);
+  int saved_out = dup(STDOUT_FILENO), saved_err = dup(STDERR_FILENO);
+  assert(saved_out >= 0 && saved_err >= 0);
+  assert(dup2(out_fd, STDOUT_FILENO) >= 0);
+  assert(dup2(err_fd, STDERR_FILENO) >= 0);
+  int rc = call(ctx);
+  fflush(NULL);
+  assert(dup2(saved_out, STDOUT_FILENO) >= 0);
+  assert(dup2(saved_err, STDERR_FILENO) >= 0);
+  close(saved_out); close(saved_err); close(out_fd); close(err_fd);
+
+  Capture cap = { .rc = rc, .out = must_read(out_path), .err = must_read(err_path) };
+  unlink(out_path); unlink(err_path);
+  return cap;
 }
 
 static Capture capture_convert(const char *path){
@@ -1212,6 +1250,280 @@ static void test_trusted_workspace_policy(void){
   rmdir(sub); rmdir(root); rmdir(outside_dir); rmdir(dir);
   free(root); free(sub); free(outside_dir); free(interpreter); free(other_interpreter);
   free(script); free(sub_script); free(outside_script); free(escape); free(dir);
+}
+
+typedef struct { const char *path; const NetwatchPlatform *platform; } ShowCtx;
+static int call_config_show(void *ctx){
+  ShowCtx *c = ctx;
+  return config_backend_show(c->path, c->platform);
+}
+
+typedef struct { const char *path; int value; const NetwatchPlatform *platform; } DryRunCtx;
+static int call_set_dry_run(void *ctx){
+  DryRunCtx *c = ctx;
+  return config_backend_set_dry_run(c->path, c->value, c->platform);
+}
+
+typedef struct { const char *path; int seconds; const NetwatchPlatform *platform; } PollCtx;
+static int call_set_poll(void *ctx){
+  PollCtx *c = ctx;
+  return config_backend_set_poll_interval(c->path, c->seconds, c->platform);
+}
+
+typedef struct {
+  const char *config_path;
+  const char *name;
+  const char *path;
+  const char *team_id;
+  const char *signing_identifier;
+  const NetwatchPlatform *platform;
+} PublisherCtx;
+
+static int call_add_publisher(void *ctx){
+  PublisherCtx *c = ctx;
+  return config_backend_add_trusted_publisher(c->config_path, c->name, c->path, c->team_id, c->signing_identifier, c->platform);
+}
+
+typedef struct { const char *config_path; const char *name; const NetwatchPlatform *platform; } RemoveCtx;
+static int call_remove_publisher(void *ctx){
+  RemoveCtx *c = ctx;
+  return config_backend_remove_trusted_publisher(c->config_path, c->name, c->platform);
+}
+
+typedef struct { const char *config_path; const char *name; const char *root; const char *interpreter; const NetwatchPlatform *platform; } WorkspaceCtx;
+static int call_add_workspace(void *ctx){
+  WorkspaceCtx *c = ctx;
+  return config_backend_add_trusted_workspace(c->config_path, c->name, c->root, c->interpreter, c->platform);
+}
+
+static int call_remove_workspace(void *ctx){
+  RemoveCtx *c = ctx;
+  return config_backend_remove_trusted_workspace(c->config_path, c->name, c->platform);
+}
+
+typedef struct { const NetwatchPlatform *platform; } ReloadCtx;
+static int call_reload_daemon(void *ctx){
+  ReloadCtx *c = ctx;
+  return config_backend_reload_daemon(c->platform);
+}
+
+typedef struct { const DiscoveredApp *apps; size_t app_count; } DiscoveryCtx;
+static int call_discovery_json(void *ctx){
+  DiscoveryCtx *c = ctx;
+  return app_discovery_print_json(c->apps, c->app_count);
+}
+
+static void test_app_discovery_json(void){
+  DiscoveredApp apps[2] = {
+    {
+      .display_name = "Alpha",
+      .bundle_path = "/Applications/Alpha.app",
+      .executable_path = "/Applications/Alpha.app/Contents/MacOS/Alpha",
+      .team_id = "TEAMID1234",
+      .signing_identifier = "com.example.Alpha",
+      .signature_valid = 1,
+      .apple_signed = 0,
+      .suitable_trusted_publisher = 1
+    },
+    {
+      .display_name = "Apple App",
+      .bundle_path = "/System/Applications/Apple.app",
+      .executable_path = "/System/Applications/Apple.app/Contents/MacOS/Apple",
+      .team_id = "APPLE",
+      .signing_identifier = "com.apple.Apple",
+      .signature_valid = 1,
+      .apple_signed = 1,
+      .suitable_trusted_publisher = 0
+    }
+  };
+  DiscoveryCtx ctx = { apps, 2 };
+  Capture cap = capture_call(call_discovery_json, &ctx);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "\"apps\": [");
+  assert_contains(cap.out, "\"displayName\": \"Alpha\"");
+  assert_contains(cap.out, "\"bundlePath\": \"/Applications/Alpha.app\"");
+  assert_contains(cap.out, "\"executablePath\": \"/Applications/Alpha.app/Contents/MacOS/Alpha\"");
+  assert_contains(cap.out, "\"teamId\": \"TEAMID1234\"");
+  assert_contains(cap.out, "\"signingIdentifier\": \"com.example.Alpha\"");
+  assert_contains(cap.out, "\"signatureValid\": true");
+  assert_contains(cap.out, "\"appleSigned\": true");
+  assert_contains(cap.out, "\"suitableTrustedPublisher\": false");
+  capture_free(&cap);
+}
+
+static void test_config_backend_editing(void){
+  char *dir = temp_dir();
+  char *config = join_path_dup(dir, "config.json");
+  char *publisher_exe = join_path_dup(dir, "publisher");
+  char *workspace_root = join_path_dup(dir, "workspace");
+  char *interpreter = join_path_dup(dir, "node");
+  mkdir_ok(workspace_root);
+  write_text_mode(publisher_exe, "x", 0700);
+  write_text_mode(interpreter, "x", 0700);
+  write_text_mode(config,
+    "{\n"
+    "  \"version\": 2,\n"
+    "  \"futureFlag\": true,\n"
+    "  \"dryRun\": true,\n"
+    "  \"allowProcesses\": {},\n"
+    "  \"allowRemoteHosts\": []\n"
+    "}\n", 0640);
+
+  FakePlatformState state = { .identity_result = CODE_SIGNATURE_IDENTITY_OK };
+  NetwatchPlatform platform = fake_platform(&state);
+
+  ShowCtx show = { config, &platform };
+  Capture cap = capture_call(call_config_show, &show);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "\"futureFlag\": true");
+  assert_before(cap.out, "\"version\"", "\"dryRun\"");
+  capture_free(&cap);
+
+  DryRunCtx dry = { config, 0, &platform };
+  cap = capture_call(call_set_dry_run, &dry);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "Changed: dryRun -> false");
+  assert_contains(cap.out, "Backup:");
+  assert_contains(cap.out, "Daemon reload recommended");
+  char *text = must_read(config);
+  assert_contains(text, "\"dryRun\": false");
+  assert_contains(text, "\"futureFlag\": true");
+  free(text);
+  char *backup = join_path_dup(dir, "config.json.bak");
+  char *backup_text = must_read(backup);
+  assert_contains(backup_text, "\"dryRun\": true");
+  free(backup_text);
+  struct stat st;
+  assert(stat(config, &st) == 0);
+  assert((st.st_mode & 0777) == 0640);
+  capture_free(&cap);
+
+  dry.value = 1;
+  cap = capture_call(call_set_dry_run, &dry);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "Changed: dryRun -> true");
+  capture_free(&cap);
+
+  PollCtx poll = { config, 42, &platform };
+  cap = capture_call(call_set_poll, &poll);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "daemon.pollIntervalSeconds -> 42");
+  text = must_read(config);
+  assert_contains(text, "\"pollIntervalSeconds\": 42");
+  free(text);
+  poll.seconds = 0;
+  cap = capture_call(call_set_poll, &poll);
+  assert(cap.rc != 0);
+  assert_contains(cap.err, "poll interval must be a positive integer");
+  capture_free(&cap);
+
+  PublisherCtx pub = { config, "Alpha Publisher", publisher_exe, "TEAMID1234", "com.example.App", &platform };
+  cap = capture_call(call_add_publisher, &pub);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_contains(text, "\"trustedPublishers\"");
+  assert_contains(text, "\"Alpha Publisher\"");
+  assert_contains(text, publisher_exe);
+  assert_contains(text, "\"teamId\": \"TEAMID1234\"");
+  assert_contains(text, "\"signingIdentifier\": \"com.example.App\"");
+  free(text);
+  capture_free(&cap);
+
+  state.identity_result = CODE_SIGNATURE_IDENTITY_INVALID_SIGNATURE;
+  platform = fake_platform(&state);
+  pub.platform = &platform;
+  pub.name = "Bad Publisher";
+  cap = capture_call(call_add_publisher, &pub);
+  assert(cap.rc != 0);
+  capture_free(&cap);
+
+  state.identity_result = CODE_SIGNATURE_IDENTITY_OK;
+  state.team_id = "BADTEAM";
+  platform = fake_platform(&state);
+  pub.platform = &platform;
+  cap = capture_call(call_add_publisher, &pub);
+  assert(cap.rc != 0);
+  assert_contains(cap.err, "Team ID mismatch");
+  capture_free(&cap);
+
+  state.team_id = NULL;
+  state.signing_identifier = "com.bad.App";
+  platform = fake_platform(&state);
+  pub.platform = &platform;
+  cap = capture_call(call_add_publisher, &pub);
+  assert(cap.rc != 0);
+  assert_contains(cap.err, "signing identifier mismatch");
+  capture_free(&cap);
+
+  RemoveCtx remove = { config, "Alpha Publisher", &platform };
+  cap = capture_call(call_remove_publisher, &remove);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_not_contains(text, "\"Alpha Publisher\"");
+  free(text);
+  capture_free(&cap);
+
+  WorkspaceCtx ws = { config, "Scripts", workspace_root, interpreter, &platform };
+  cap = capture_call(call_add_workspace, &ws);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_contains(text, "\"trustedWorkspaces\"");
+  assert_contains(text, "\"Scripts\"");
+  assert_contains(text, "\"allowSubdirectories\": true");
+  assert_contains(text, "\"allowByCwdOnly\": false");
+  free(text);
+  capture_free(&cap);
+
+  char *missing_root = join_path_dup(dir, "missing");
+  ws.name = "Missing";
+  ws.root = missing_root;
+  cap = capture_call(call_add_workspace, &ws);
+  assert(cap.rc != 0);
+  assert_contains(cap.err, "root must exist");
+  capture_free(&cap);
+
+  char *not_exec = join_path_dup(dir, "not-exec");
+  write_text_mode(not_exec, "x", 0600);
+  ws.root = workspace_root;
+  ws.interpreter = not_exec;
+  cap = capture_call(call_add_workspace, &ws);
+  assert(cap.rc != 0);
+  assert_contains(cap.err, "interpreter must exist and be executable");
+  capture_free(&cap);
+
+  RemoveCtx remove_ws = { config, "Scripts", &platform };
+  cap = capture_call(call_remove_workspace, &remove_ws);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_not_contains(text, "\"Scripts\"");
+  assert_contains(text, "\"futureFlag\": true");
+  free(text);
+  capture_free(&cap);
+
+  unlink(config); unlink(backup); unlink(publisher_exe); unlink(interpreter); unlink(not_exec);
+  rmdir(workspace_root); rmdir(dir);
+  free(config); free(backup); free(publisher_exe); free(workspace_root); free(interpreter);
+  free(missing_root); free(not_exec); free(dir);
+}
+
+static void test_config_backend_reload_daemon(void){
+  FakePlatformState state = { .reload_daemon_result = 1 };
+  NetwatchPlatform platform = fake_platform(&state);
+  ReloadCtx ctx = { &platform };
+  Capture cap = capture_call(call_reload_daemon, &ctx);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "Daemon reload requested.");
+  assert(state.reload_daemon_calls == 1);
+  capture_free(&cap);
+
+  state = (FakePlatformState){ .reload_daemon_result = 0 };
+  platform = fake_platform(&state);
+  ctx.platform = &platform;
+  cap = capture_call(call_reload_daemon, &ctx);
+  assert(cap.rc != 0);
+  assert_contains(cap.err, "fake daemon is not running");
+  assert(state.reload_daemon_calls == 1);
+  capture_free(&cap);
 }
 
 static void test_config_conversion(void){
@@ -2789,6 +3101,9 @@ int main(void){
   test_config_trusted_workspaces();
   test_config_daemon();
   test_trusted_workspace_policy();
+  test_app_discovery_json();
+  test_config_backend_editing();
+  test_config_backend_reload_daemon();
   test_config_conversion();
   test_backup_suffix();
   test_deterministic_json_formatting();

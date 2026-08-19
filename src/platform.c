@@ -501,6 +501,20 @@ static int platform_launchd_service_loaded_default(const NetwatchPlatform *platf
   return rc < 0 ? -1 : rc == 0;
 }
 
+static int platform_reload_daemon_default(const NetwatchPlatform *platform, const char *label, char *err, size_t err_len){
+  int loaded = platform_launchd_service_loaded_default(platform, label);
+  if (loaded != 1){
+    set_error(err, err_len, loaded == 0 ? "daemon is not running" : "failed to inspect daemon state");
+    return 0;
+  }
+  char target[256];
+  snprintf(target, sizeof(target), "gui/%d/%s", (int)getuid(), label);
+  char *argv[] = { "launchctl", "kill", "SIGHUP", target, NULL };
+  if (spawn_quiet(argv) == 0) return 1;
+  set_error(err, err_len, "failed to signal daemon reload");
+  return 0;
+}
+
 static int same_path(const char *left, const char *right){
   char left_real[PATH_MAX], right_real[PATH_MAX];
   const char *l = realpath(left, left_real) ? left_real : left;
@@ -561,6 +575,7 @@ static const NetwatchPlatform default_platform = {
   .daemon_should_stop = NULL,
   .daemon_should_reload = NULL,
   .launchd_service_loaded = platform_launchd_service_loaded_default,
+  .reload_daemon = platform_reload_daemon_default,
   .find_process_by_executable = platform_find_process_by_executable_default
 };
 

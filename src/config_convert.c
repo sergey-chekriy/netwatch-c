@@ -1,5 +1,6 @@
 #include "config_convert.h"
 #include "config.h"
+#include "config_json.h"
 #include "cJSON.h"
 #include "util.h"
 #include <errno.h>
@@ -169,7 +170,7 @@ static int json_print_value(Buffer *buf, const cJSON *item, int indent, int dept
   return 0;
 }
 
-static char *json_print(cJSON *root){
+char *config_json_print(cJSON *root){
   Buffer buf = {0};
   if (!json_print_value(&buf, root, 0, 0) || !buf_append_char(&buf, '\n')){ free(buf.data); return NULL; }
   return buf.data;
@@ -479,7 +480,7 @@ static int config_convert_in_place_base(const char *config_path, const NetwatchP
     rc = 0; goto done;
   }
 
-  converted = json_print(root);
+  converted = config_json_print(root);
   if (!converted){ fail_msg("out of memory serializing converted config"); goto done; }
   if (!config_parse_text(&cfg, converted, "converted config", err, sizeof(err))){
     fail_msg("converted config did not validate: %s", err); goto done;

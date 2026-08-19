@@ -9,10 +9,11 @@ It periodically:
 1. obtains active network connections;
 2. resolves each process executable path;
 3. checks deny and allow rules;
-4. identifies trusted Apple system components;
-5. identifies configured trusted third-party publishers;
-6. logs unknown processes;
-7. optionally disables Wi-Fi.
+4. identifies configured trusted third-party publishers;
+5. identifies trusted workspaces for interpreter-based scripts;
+6. identifies trusted Apple system components;
+7. logs unknown processes;
+8. optionally disables Wi-Fi.
 
 The program must remain:
 
@@ -41,8 +42,11 @@ The program must remain:
 Existing modules:
 
 - `config` - JSON configuration loading, validation, and defaults;
+- `config_json` - deterministic JSON serialization shared by config writers;
+- `config_backend` - safe config-management commands for future UI/configurator use;
 - `config_convert` - in-place config migration;
 - `config_check` - standalone config validation command;
+- `app_discovery` - installed macOS `.app` discovery JSON;
 - `process` - process and executable-path discovery;
 - `allow` - centralized deny/trusted-publisher/allow/Apple-trust decision logic;
 - `trusted_publisher` - third-party signed identity rule verification;
@@ -50,7 +54,7 @@ Existing modules:
 - `monitor` - normal scan, logging, enforcement, dry-run, and stats orchestration;
 - `audit` - non-enforcing observation report;
 - `status` - launchd/runtime/config status command;
-- `status_snapshot` - daemon status JSON for future menu bar integration;
+- `status_snapshot` - daemon status JSON for menu bar integration;
 - `packaging/menu-bar` - native AppKit status indicator with a dry-run config toggle;
 - `platform` - OS and filesystem boundary used by production code and tests;
 - `logging` - log output;
@@ -83,10 +87,11 @@ Rules must be evaluated in this order:
 ```text
 1. deny rule
 2. trusted publisher rule
-3. localhost LISTEN rule
-4. explicit allow rule
-5. trusted Apple system component
-6. unknown process
+3. trusted workspace rule
+4. localhost LISTEN rule
+5. explicit allow rule
+6. trusted Apple system component
+7. unknown process
 ```
 
 Deny rules always have the highest priority.
@@ -288,6 +293,15 @@ trusted_publisher.c
 
 trusted_workspace.c
     evaluates configured interpreter path, process cwd and resolved script path
+
+app_discovery.c
+    discovers installed macOS app bundles and signed identity metadata as JSON
+
+config_json.h / config_json_print
+    exposes deterministic JSON output implemented in config_convert.c
+
+config_backend.c
+    edits selected config fields with validation, backup and atomic replace
 
 allow.c
     applies policy priority and returns final decision
