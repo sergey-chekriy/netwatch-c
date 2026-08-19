@@ -278,6 +278,41 @@ static int parse_trusted_workspaces(cJSON *json, TrustedWorkspaceRules *out, cha
   return 1;
 }
 
+static int known_daemon_field(const char *field){
+  static const char *known[] = { "pollIntervalSeconds", "reloadOnSighup", "exitOnConfigError" };
+  for (size_t i = 0; i < sizeof(known) / sizeof(*known); i++) if (field && !strcmp(field, known[i])) return 1;
+  return 0;
+}
+
+static int parse_positive_int(cJSON *json, int *out, const char *where, char *err, size_t err_len){
+  if (!json) return 1;
+  if (!cJSON_IsNumber(json)){ set_error(err, err_len, "%s must be a positive integer", where); return 0; }
+  errno = 0;
+  char *end = NULL;
+  long value = strtol(json->valuestring, &end, 10);
+  if (errno || !end || *end || value < 1 || value > INT_MAX){
+    set_error(err, err_len, "%s must be a positive integer", where);
+    return 0;
+  }
+  *out = (int)value;
+  return 1;
+}
+
+static int parse_daemon(cJSON *json, DaemonConfig *out, char *err, size_t err_len){
+  if (!json) return 1;
+  if (!cJSON_IsObject(json)){ set_error(err, err_len, "daemon must be an object"); return 0; }
+  for (cJSON *field = json->child; field; field = field->next){
+    if (!known_daemon_field(field->string)){
+      set_error(err, err_len, "daemon.%s unsupported field", field->string ? field->string : "(unknown)");
+      return 0;
+    }
+  }
+  if (!parse_positive_int(cJSON_GetObjectItemCaseSensitive(json, "pollIntervalSeconds"), &out->poll_interval_seconds, "daemon.pollIntervalSeconds", err, err_len)) return 0;
+  if (!parse_optional_bool(cJSON_GetObjectItemCaseSensitive(json, "reloadOnSighup"), &out->reload_on_sighup, "daemon.reloadOnSighup", err, err_len)) return 0;
+  if (!parse_optional_bool(cJSON_GetObjectItemCaseSensitive(json, "exitOnConfigError"), &out->exit_on_config_error, "daemon.exitOnConfigError", err, err_len)) return 0;
+  return 1;
+}
+
 static int parse_version(cJSON *json, char *err, size_t err_len){
   if (!json) return 1;
   if (!cJSON_IsNumber(json)){
@@ -299,7 +334,14 @@ static int parse_version(cJSON *json, char *err, size_t err_len){
 }
 
 int config_parse_text(Config *cfg, const char *text, const char *source, char *err, size_t err_len){
-  *cfg = (Config){ .dry_run = true };
+  *cfg = (Config){
+    .dry_run = true,
+    .daemon = {
+      .poll_interval_seconds = 300,
+      .reload_on_sighup = true,
+      .exit_on_config_error = false
+    }
+  };
   cJSON *root = cJSON_Parse(text);
   if (!root){ set_error(err, err_len, "invalid JSON in %s", source); return 0; }
   if (!cJSON_IsObject(root)){ cJSON_Delete(root); set_error(err, err_len, "config root must be object"); return 0; }
@@ -321,7 +363,8 @@ int config_parse_text(Config *cfg, const char *text, const char *source, char *e
     && parse_string_array(cJSON_GetObjectItemCaseSensitive(root, "allowRemoteHosts"), &cfg->allow_remote_hosts, "allowRemoteHosts", err, err_len)
     && parse_allow_processes(cJSON_GetObjectItemCaseSensitive(root, "allowProcesses"), &cfg->allow_processes, err, err_len)
     && parse_trusted_publishers(cJSON_GetObjectItemCaseSensitive(root, "trustedPublishers"), &cfg->trusted_publishers, err, err_len)
-    && parse_trusted_workspaces(cJSON_GetObjectItemCaseSensitive(root, "trustedWorkspaces"), &cfg->trusted_workspaces, err, err_len);
+    && parse_trusted_workspaces(cJSON_GetObjectItemCaseSensitive(root, "trustedWorkspaces"), &cfg->trusted_workspaces, err, err_len)
+    && parse_daemon(cJSON_GetObjectItemCaseSensitive(root, "daemon"), &cfg->daemon, err, err_len);
   cJSON_Delete(root);
   if (!ok) config_free(cfg);
   return ok;

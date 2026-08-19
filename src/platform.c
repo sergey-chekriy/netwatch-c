@@ -558,6 +558,8 @@ static const NetwatchPlatform default_platform = {
   .disable_wifi = platform_disable_wifi_default,
   .now = platform_now_default,
   .sleep_seconds = platform_sleep_seconds_default,
+  .daemon_should_stop = NULL,
+  .daemon_should_reload = NULL,
   .launchd_service_loaded = platform_launchd_service_loaded_default,
   .find_process_by_executable = platform_find_process_by_executable_default
 };

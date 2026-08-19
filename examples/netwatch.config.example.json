@@ -1,6 +1,11 @@
 {
   "version": 2,
   "dryRun": true,
+  "daemon": {
+    "pollIntervalSeconds": 300,
+    "reloadOnSighup": true,
+    "exitOnConfigError": false
+  },
   "allowAppleSystemComponents": true,
   "trustedPublishers": {},
   "trustedWorkspaces": {},

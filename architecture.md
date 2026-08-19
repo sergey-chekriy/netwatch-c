@@ -291,7 +291,10 @@ allow.c
     applies policy priority and returns final decision
 
 monitor.c
-    orchestrates scanning, logging, statistics and Wi-Fi action
+    orchestrates one scan, logging, statistics and Wi-Fi action
+
+daemon.c
+    owns foreground daemon loop, signal flags, config reload and instance lock
 
 main.c
     parses CLI mode and dispatches to one module
@@ -302,6 +305,10 @@ main.c
 Standalone commands (`--convert-config`, `--check-config`, `--why`, `--audit`, `--status`)
 must exit before entering the normal monitoring workflow. `--status`, `--check-config`, and
 `--why` must not start `lsof`, scan connections, or change Wi-Fi state.
+
+`--once --config <path>` is an explicit spelling of one-shot monitoring. `--daemon --config
+<path>` loads one valid config, acquires the daemon lock, and repeatedly calls the same
+`monitor_scan_config` path used by one-shot mode.
 
 ## 10.1 Platform boundary
 
@@ -316,10 +323,23 @@ The default platform implementation:
 - keeps filesystem operations for config conversion behind injectable callbacks;
 - exposes Apple trust verification as an injectable callback for deterministic tests.
 
+## 10.2 Daemon mode
+
+Daemon mode stays in the foreground for launchd. It does not fork or detach.
+
+The daemon loop:
+
+- loads and validates config before acquiring the lock;
+- uses an advisory `flock` lock derived from the config path;
+- checks simple signal flags for SIGTERM, SIGINT and SIGHUP;
+- reloads into a temporary `Config` and swaps only after validation succeeds;
+- keeps the previous valid config on reload failure unless `exitOnConfigError` is true;
+- calls shared monitor/policy code for each scan.
+
 Tests should prefer fake platform callbacks or fake executables on `PATH` over invoking real
 Wi-Fi, monitoring, or launchd side effects.
 
-## 10.2 Trusted publisher verification
+## 10.3 Trusted publisher verification
 
 Trusted publisher rules are configured separately from path-only `allowProcesses`.
 
@@ -355,7 +375,7 @@ signature before reading `kSecCodeInfoTeamIdentifier` and `kSecCodeInfoIdentifie
 does not use executable hashes, certificate common names, display names, versions, or modification
 times for trusted publisher decisions.
 
-## 10.3 Trusted workspace rules
+## 10.4 Trusted workspace rules
 
 Trusted workspace rules are configured separately from both `trustedPublishers` and path-only
 `allowProcesses`. They are only for interpreter-launched scripts.

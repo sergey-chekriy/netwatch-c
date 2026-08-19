@@ -93,14 +93,9 @@ void monitor_stats_print(const MonitorStats *stats){
   printf("Failed Wi-Fi disable actions: %zu\n", stats->failed_wifi_disable_actions);
 }
 
-int monitor_run_with_stats(const char *cfg_path, bool force_dry_run, MonitorStats *stats, const NetwatchPlatform *platform){
+int monitor_scan_config(const Config *cfg, MonitorStats *stats, const NetwatchPlatform *platform){
   platform = netwatch_platform_or_default(platform);
-  if (stats) *stats = (MonitorStats){0};
   char err[512] = {0};
-  Config cfg = {0};
-  if (!config_load_with_platform(&cfg, cfg_path, platform, err, sizeof(err))){ fprintf(stderr, "ERROR: %s\n", err); return 1; }
-  if (force_dry_run) cfg.dry_run = true;
-  if (stats) stats->started_at = platform->now ? platform->now(platform) : time(NULL);
 
   StrList connections = {0}, suspicious = {0};
   StrList unique_processes = {0}, unique_paths = {0};
@@ -111,12 +106,12 @@ int monitor_run_with_stats(const char *cfg_path, bool force_dry_run, MonitorStat
 
   for (size_t i = 0; i < connections.len; i++){
     char proc_copy[128] = {0};
+    snprintf(proc_copy, sizeof(proc_copy), "%s", process_name_of(connections.items[i]));
     if (stats){
-      snprintf(proc_copy, sizeof(proc_copy), "%s", process_name_of(connections.items[i]));
       if (!strlist_push_unique(&unique_processes, proc_copy)){ fprintf(stderr, "ERROR: out of memory collecting monitor statistics\n"); rc = 1; goto done; }
       stats->connections_scanned++;
     }
-    ConnectionPolicy policy = connection_policy_with_platform(connections.items[i], &cfg, &cache, platform);
+    ConnectionPolicy policy = connection_policy_with_platform(connections.items[i], cfg, &cache, platform);
     if (stats){
       int pid = 0;
       stats_count_policy(stats, policy);
@@ -129,7 +124,7 @@ int monitor_run_with_stats(const char *cfg_path, bool force_dry_run, MonitorStat
       }
     }
     if (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER || policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE){
-      log_trusted_publisher_success(&cfg, connections.items[i], &cache, policy, platform);
+      log_trusted_publisher_success(cfg, connections.items[i], &cache, policy, platform);
     }
     if (connection_decision_allowed(policy.decision)) continue;
     char *desc = describe_connection_with_platform(connections.items[i], &cache, policy, platform);
@@ -141,10 +136,10 @@ int monitor_run_with_stats(const char *cfg_path, bool force_dry_run, MonitorStat
     char *reason = join_suspicious(&suspicious);
     if (!reason){ fprintf(stderr, "ERROR: out of memory\n"); rc = 1; goto done; }
     if (stats) stats->requested_enforcement_actions++;
-    if (disable_wifi_if_needed_with_platform(&cfg, reason, isatty(STDOUT_FILENO), platform, err, sizeof(err))){
-      if (stats && !cfg.dry_run) stats->successful_wifi_disable_actions++;
+    if (disable_wifi_if_needed_with_platform(cfg, reason, isatty(STDOUT_FILENO), platform, err, sizeof(err))){
+      if (stats && !cfg->dry_run) stats->successful_wifi_disable_actions++;
     } else {
-      if (stats && !cfg.dry_run) stats->failed_wifi_disable_actions++;
+      if (stats && !cfg->dry_run) stats->failed_wifi_disable_actions++;
       fprintf(stderr, "ERROR: %s\n", err); rc = 1;
     }
     free(reason);
@@ -161,6 +156,18 @@ done:
   strlist_free(&unique_paths);
   strlist_free(&connections);
   strlist_free(&suspicious);
+  return rc;
+}
+
+int monitor_run_with_stats(const char *cfg_path, bool force_dry_run, MonitorStats *stats, const NetwatchPlatform *platform){
+  platform = netwatch_platform_or_default(platform);
+  if (stats) *stats = (MonitorStats){0};
+  char err[512] = {0};
+  Config cfg = {0};
+  if (!config_load_with_platform(&cfg, cfg_path, platform, err, sizeof(err))){ fprintf(stderr, "ERROR: %s\n", err); return 1; }
+  if (force_dry_run) cfg.dry_run = true;
+  if (stats) stats->started_at = platform->now ? platform->now(platform) : time(NULL);
+  int rc = monitor_scan_config(&cfg, stats, platform);
   config_free(&cfg);
   return rc;
 }

@@ -13,8 +13,15 @@ typedef struct { char *process; StrList paths; } ProcessRule;
 typedef struct { ProcessRule *items; size_t len; size_t cap; } ProcessRules;
 
 typedef struct {
+  int poll_interval_seconds;
+  bool reload_on_sighup;
+  bool exit_on_config_error;
+} DaemonConfig;
+
+typedef struct {
   bool dry_run;
   bool allow_apple_system_components;
+  DaemonConfig daemon;
   char *interface;
   char *log_path;
   StrList deny_patterns;

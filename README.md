@@ -152,6 +152,43 @@ DRY RUN: would disable Wi-Fi
 
 This command-line flag overrides the config for that run only. It does not edit the config file.
 
+## Once and daemon modes
+
+One-shot mode runs one scan and exits. This is the historical behavior and remains the default:
+
+```bash
+./netwatch /path/to/netwatch.config.json
+./netwatch --once --config /path/to/netwatch.config.json
+```
+
+Daemon mode stays in the foreground and repeats scans using the interval from config:
+
+```bash
+./netwatch --daemon --config /path/to/netwatch.config.json
+```
+
+`launchd` should manage the daemon process; `netwatch` does not fork or detach. Daemon mode is better for enforcement because the process stays warm, keeps using the same policy engine, and scans on its configured interval instead of waiting for launchd to start a new one-shot job.
+
+Recommended intervals:
+
+```text
+300 seconds: balanced daemon monitoring
+5-60 seconds: aggressive active protection
+15-30 minutes: passive audit, not strong enforcement
+```
+
+`dryRun` works the same in daemon mode: suspicious connections are logged, Wi-Fi is never disabled, and monitoring continues.
+
+Signals:
+
+```bash
+kill -TERM <pid>   # graceful stop
+kill -INT <pid>    # graceful stop
+kill -HUP <pid>    # reload config when daemon.reloadOnSighup is true
+```
+
+If reload fails and `daemon.exitOnConfigError` is `false`, the previous valid config remains active and the reload error is logged. If it is `true`, daemon mode exits non-zero.
+
 ## Runtime statistics
 
 Run one normal monitoring pass and print counters afterward:
@@ -447,6 +484,11 @@ Example:
 {
   "version": 2,
   "dryRun": true,
+  "daemon": {
+    "pollIntervalSeconds": 300,
+    "reloadOnSighup": true,
+    "exitOnConfigError": false
+  },
   "allowAppleSystemComponents": true,
   "trustedPublishers": {},
   "trustedWorkspaces": {},
@@ -503,6 +545,20 @@ When `dryRun` is `false`, the tool disables Wi-Fi if suspicious connections are 
 ```
 
 Use `dryRun: true` until the allowlist is stable.
+
+### `daemon`
+
+Daemon mode settings:
+
+```json
+"daemon": {
+  "pollIntervalSeconds": 300,
+  "reloadOnSighup": true,
+  "exitOnConfigError": false
+}
+```
+
+All fields are optional. Defaults are 300 seconds, reload on SIGHUP enabled, and keep the previous valid config after a bad reload. `pollIntervalSeconds` must be at least 1.
 
 ### `allowAppleSystemComponents`
 
@@ -773,6 +829,20 @@ It creates:
 
 The default interval is 1800 seconds, or 30 minutes.
 
+For continuous foreground daemon mode, use the example plist:
+
+```text
+packaging/launchd/com.sergey.netwatch.plist
+```
+
+It runs:
+
+```bash
+/usr/local/bin/netwatch --daemon --config /etc/netwatch/config.json
+```
+
+Copy it to the appropriate LaunchDaemon or LaunchAgent location, adjust paths, then load it with `launchctl`. The repository does not automatically install this example plist.
+
 Check status:
 
 ```bash
@@ -792,6 +862,62 @@ Inspect the plist:
 ```bash
 plutil -p ~/Library/LaunchAgents/com.serg.netwatch.plist
 ```
+
+## Migrating from scheduled one-shot execution to LaunchDaemon
+
+Keep `dryRun` enabled while migrating so the new daemon logs decisions without disabling Wi-Fi:
+
+```json
+"dryRun": true
+```
+
+Find old scheduled one-shot runs before installing the daemon:
+
+```bash
+crontab -l | grep -i netwatch
+launchctl list | grep -i netwatch
+grep -R "netwatch" "$HOME/Library/LaunchAgents" /Library/LaunchAgents /Library/LaunchDaemons 2>/dev/null
+```
+
+Unload the old job only after you have identified the exact plist path. For a user LaunchAgent:
+
+```bash
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.serg.netwatch.plist"
+```
+
+For a machine-level LaunchDaemon:
+
+```bash
+sudo launchctl bootout system /Library/LaunchDaemons/com.serg.netwatch.plist
+```
+
+Install the new daemon plist by copying and editing the example. Adjust `ProgramArguments` before loading it:
+
+```bash
+sudo cp packaging/launchd/com.sergey.netwatch.plist /Library/LaunchDaemons/com.sergey.netwatch.plist
+sudo plutil -lint /Library/LaunchDaemons/com.sergey.netwatch.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.sergey.netwatch.plist
+```
+
+Manage the daemon:
+
+```bash
+sudo launchctl print system/com.sergey.netwatch
+sudo launchctl kickstart -k system/com.sergey.netwatch
+sudo launchctl bootout system /Library/LaunchDaemons/com.sergey.netwatch.plist
+sudo kill -HUP <pid>
+~/.watch/netwatch --status
+```
+
+Verify that only one `netwatch` instance is active:
+
+```bash
+pgrep -af netwatch
+launchctl list | grep -i netwatch
+sudo launchctl print system/com.sergey.netwatch | grep -E "pid|state|last exit"
+```
+
+Daemon mode also keeps a single-instance lock for the same config path. If a second daemon is started for that config, it exits with a clear error instead of running another monitor loop.
 
 ## Remove launchd job
 

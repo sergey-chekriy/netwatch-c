@@ -4,6 +4,7 @@
 #include "config.h"
 #include "config_check.h"
 #include "config_convert.h"
+#include "daemon.h"
 #include "monitor.h"
 #include "status.h"
 #include "strlist.h"
@@ -16,6 +17,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -158,14 +160,29 @@ typedef struct {
   int launchd_calls;
   int launchd_loaded_result;
   int find_process_calls;
+  int read_file_calls;
+  int daemon_stop_calls;
+  int daemon_reload_calls;
+  int daemon_reload_used;
   int find_process_result;
+  int daemon_stop_after_collects;
+  int daemon_reload_after_collects;
   int running_pid;
   const char *running_path;
+  const char **read_files;
+  size_t read_file_count;
   CodeSignatureIdentityResult identity_result;
   const char *team_id;
   const char *signing_identifier;
   char wifi_interface[64];
 } FakePlatformState;
+
+static char *fake_platform_read_file(const NetwatchPlatform *platform, const char *path, char *err, size_t err_len){
+  FakePlatformState *state = platform->ctx;
+  size_t call = (size_t)state->read_file_calls++;
+  if (state->read_files && call < state->read_file_count) return xstrdup(state->read_files[call]);
+  return netwatch_platform_default()->read_file(netwatch_platform_default(), path, err, err_len);
+}
 
 static AppleTrustResult fake_platform_apple(const NetwatchPlatform *platform, const char *path, char *reason, size_t reason_size){
   FakePlatformState *state = platform->ctx;
@@ -280,9 +297,27 @@ static int fake_platform_find_process(const NetwatchPlatform *platform, const ch
   return state->find_process_result;
 }
 
+static int fake_platform_daemon_should_stop(const NetwatchPlatform *platform){
+  FakePlatformState *state = platform->ctx;
+  state->daemon_stop_calls++;
+  return state->daemon_stop_after_collects && state->collect_calls >= state->daemon_stop_after_collects;
+}
+
+static int fake_platform_daemon_should_reload(const NetwatchPlatform *platform){
+  FakePlatformState *state = platform->ctx;
+  state->daemon_reload_calls++;
+  if (state->daemon_reload_used) return 0;
+  if (state->daemon_reload_after_collects && state->collect_calls >= state->daemon_reload_after_collects){
+    state->daemon_reload_used = 1;
+    return 1;
+  }
+  return 0;
+}
+
 static NetwatchPlatform fake_platform(FakePlatformState *state){
   NetwatchPlatform platform = *netwatch_platform_default();
   platform.ctx = state;
+  platform.read_file = fake_platform_read_file;
   platform.apple_trust_check = fake_platform_apple;
   platform.collect_connections = fake_platform_collect;
   platform.process_path = fake_platform_process_path;
@@ -295,6 +330,8 @@ static NetwatchPlatform fake_platform(FakePlatformState *state){
   platform.copy_file = fake_platform_copy_file;
   platform.now = fake_platform_now;
   platform.sleep_seconds = fake_platform_sleep;
+  platform.daemon_should_stop = fake_platform_daemon_should_stop;
+  platform.daemon_should_reload = fake_platform_daemon_should_reload;
   platform.launchd_service_loaded = fake_platform_launchd_loaded;
   platform.find_process_by_executable = fake_platform_find_process;
   return platform;
@@ -466,6 +503,28 @@ static Capture capture_monitor_stats(const char *path, MonitorStats *stats, cons
   assert(dup2(out_fd, STDOUT_FILENO) >= 0);
   assert(dup2(err_fd, STDERR_FILENO) >= 0);
   int rc = monitor_run_with_stats(path, false, stats, platform);
+  fflush(NULL);
+  assert(dup2(saved_out, STDOUT_FILENO) >= 0);
+  assert(dup2(saved_err, STDERR_FILENO) >= 0);
+  close(saved_out); close(saved_err); close(out_fd); close(err_fd);
+
+  Capture cap = { .rc = rc, .out = must_read(out_path), .err = must_read(err_path) };
+  unlink(out_path); unlink(err_path);
+  return cap;
+}
+
+static Capture capture_daemon(const char *path, const NetwatchPlatform *platform){
+  char out_path[] = "/tmp/netwatch_daemon_out_XXXXXX";
+  char err_path[] = "/tmp/netwatch_daemon_err_XXXXXX";
+  int out_fd = mkstemp(out_path), err_fd = mkstemp(err_path);
+  assert(out_fd >= 0 && err_fd >= 0);
+
+  fflush(NULL);
+  int saved_out = dup(STDOUT_FILENO), saved_err = dup(STDERR_FILENO);
+  assert(saved_out >= 0 && saved_err >= 0);
+  assert(dup2(out_fd, STDOUT_FILENO) >= 0);
+  assert(dup2(err_fd, STDERR_FILENO) >= 0);
+  int rc = daemon_run_with_platform(path, platform);
   fflush(NULL);
   assert(dup2(saved_out, STDOUT_FILENO) >= 0);
   assert(dup2(saved_err, STDERR_FILENO) >= 0);
@@ -941,6 +1000,39 @@ static void test_config_trusted_workspaces(void){
   assert_config_error("{\"trustedWorkspaces\":{\"w\":{\"roots\":[\"/tmp\"],\"allowSubdirectories\":true,\"interpreters\":[\"/bin/node\"],\"hash\":\"no\"}}}\n", "trustedWorkspaces.w.hash unsupported field");
 }
 
+static void test_config_daemon(void){
+  Config cfg = parse_config_ok("{\"version\":2,\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n");
+  assert(cfg.daemon.poll_interval_seconds == 300);
+  assert(cfg.daemon.reload_on_sighup);
+  assert(!cfg.daemon.exit_on_config_error);
+  config_free(&cfg);
+
+  cfg = parse_config_ok(
+    "{\n"
+    "  \"version\": 2,\n"
+    "  \"daemon\": {\n"
+    "    \"pollIntervalSeconds\": 5,\n"
+    "    \"reloadOnSighup\": false,\n"
+    "    \"exitOnConfigError\": true\n"
+    "  },\n"
+    "  \"allowProcesses\": {},\n"
+    "  \"allowRemoteHosts\": []\n"
+    "}\n");
+  assert(cfg.daemon.poll_interval_seconds == 5);
+  assert(!cfg.daemon.reload_on_sighup);
+  assert(cfg.daemon.exit_on_config_error);
+  config_free(&cfg);
+
+  assert_config_error("{\"daemon\":[]}\n", "daemon must be an object");
+  assert_config_error("{\"daemon\":{\"pollIntervalSeconds\":0}}\n", "daemon.pollIntervalSeconds must be a positive integer");
+  assert_config_error("{\"daemon\":{\"pollIntervalSeconds\":-1}}\n", "daemon.pollIntervalSeconds must be a positive integer");
+  assert_config_error("{\"daemon\":{\"pollIntervalSeconds\":1.5}}\n", "daemon.pollIntervalSeconds must be a positive integer");
+  assert_config_error("{\"daemon\":{\"pollIntervalSeconds\":\"30\"}}\n", "daemon.pollIntervalSeconds must be a positive integer");
+  assert_config_error("{\"daemon\":{\"reloadOnSighup\":\"yes\"}}\n", "daemon.reloadOnSighup must be boolean");
+  assert_config_error("{\"daemon\":{\"exitOnConfigError\":\"no\"}}\n", "daemon.exitOnConfigError must be boolean");
+  assert_config_error("{\"daemon\":{\"lockPath\":\"/tmp/x\"}}\n", "daemon.lockPath unsupported field");
+}
+
 static Config parse_workspace_config(const char *root, const char *interpreter, int allow_subdirs, int allow_by_cwd_only, int add_path_allow, int add_apple){
   char text[8192];
   snprintf(text, sizeof(text),
@@ -1118,6 +1210,11 @@ static void test_config_conversion(void){
   snprintf(original, sizeof(original),
     "{\n"
     "  \"dryRun\": true,\n"
+    "  \"daemon\": {\n"
+    "    \"pollIntervalSeconds\": 10,\n"
+    "    \"reloadOnSighup\": true,\n"
+    "    \"exitOnConfigError\": false\n"
+    "  },\n"
     "  \"futureFlag\": true,\n"
     "  \"trustedPublishers\": {\n"
     "    \"Manual Trusted\": {\n"
@@ -1165,6 +1262,8 @@ static void test_config_conversion(void){
 
   assert_contains(converted, "\"allowAppleSystemComponents\": true");
   assert_contains(converted, "\"version\": 2");
+  assert_contains(converted, "\"daemon\"");
+  assert_contains(converted, "\"pollIntervalSeconds\": 10");
   assert_contains(converted, "\"futureFlag\": true");
   assert_contains(converted, "\"trustedPublishers\"");
   assert_contains(converted, "\"Manual Trusted\"");
@@ -1236,6 +1335,7 @@ static void test_deterministic_json_formatting(void){
     "{\n"
     "  \"zUnknown\": {\"beta\": false, \"alpha\": true},\n"
     "  \"dryRun\": true,\n"
+    "  \"daemon\": {\"reloadOnSighup\": true, \"pollIntervalSeconds\": 11, \"exitOnConfigError\": false},\n"
     "  \"trustedPublishers\": {\n"
     "    \"BetaPub\": {\"teamId\": \"BTEAM\", \"signingIdentifier\": \"com.beta\", \"paths\": [\"/Applications/Beta.app/Contents/MacOS/Beta\"]},\n"
     "    \"AlphaPub\": {\"signingIdentifier\": \"com.alpha\", \"paths\": [\"/Applications/Alpha.app/Contents/MacOS/Alpha\"], \"teamId\": \"ATEAM\"}\n"
@@ -1259,6 +1359,7 @@ static void test_deterministic_json_formatting(void){
     "    \"Beta\": \"/Applications/Beta.app/Contents/*\"\n"
     "  },\n"
     "  \"denyPatterns\": [\"deny-b\", \"deny-a\"],\n"
+    "  \"daemon\": {\"exitOnConfigError\": false, \"pollIntervalSeconds\": 11, \"reloadOnSighup\": true},\n"
     "  \"dryRun\": true,\n"
     "  \"trustedPublishers\": {\n"
     "    \"AlphaPub\": {\"teamId\": \"ATEAM\", \"paths\": [\"/Applications/Alpha.app/Contents/MacOS/Alpha\"], \"signingIdentifier\": \"com.alpha\"},\n"
@@ -1286,7 +1387,8 @@ static void test_deterministic_json_formatting(void){
   assert(out_a[strlen(out_a) - 1] == '\n');
   assert_contains(out_a, "\"zUnknown\"");
   assert_before(out_a, "\"version\"", "\"dryRun\"");
-  assert_before(out_a, "\"dryRun\"", "\"allowAppleSystemComponents\"");
+  assert_before(out_a, "\"dryRun\"", "\"daemon\"");
+  assert_before(out_a, "\"daemon\"", "\"allowAppleSystemComponents\"");
   assert_before(out_a, "\"allowAppleSystemComponents\"", "\"trustedPublishers\"");
   assert_before(out_a, "\"trustedPublishers\"", "\"trustedWorkspaces\"");
   assert_before(out_a, "\"trustedWorkspaces\"", "\"denyPatterns\"");
@@ -1807,6 +1909,47 @@ static void test_cli_dry_run_mode(void){
   free(config); free(out); free(log); free(wifi_marker); free(lsof); free(networksetup); free(dir);
 }
 
+static void test_cli_once_mode(void){
+  char *dir = temp_dir();
+  char *config = join_path_dup(dir, "netwatch.config.json");
+  char *out = join_path_dup(dir, "out.txt");
+  char *log = join_path_dup(dir, "netwatch.log");
+  char *wifi_marker = join_path_dup(dir, "networksetup-marker");
+  char *lsof = join_path_dup(dir, "lsof");
+  char *networksetup = join_path_dup(dir, "networksetup");
+
+  write_text_mode(lsof,
+    "#!/bin/sh\n"
+    "if [ \"$1\" = \"-i\" ]; then\n"
+    "  echo 'OnceProc 42 user 10u IPv4 TCP 10.0.0.1:123->203.0.113.10:443 (ESTABLISHED)'\n"
+    "elif [ \"$1\" = \"-a\" ]; then\n"
+    "  echo 'n/Applications/Once.app/Contents/MacOS/Once'\n"
+    "fi\n"
+    "exit 0\n",
+    0755);
+  char script[1024];
+  snprintf(script, sizeof(script), "#!/bin/sh\necho called > %s\nexit 0\n", wifi_marker);
+  write_text_mode(networksetup, script, 0755);
+  snprintf(script, sizeof(script),
+    "{\"version\":2,\"dryRun\":true,\"logPath\":\"%s\",\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n",
+    log);
+  write_text_mode(config, script, 0600);
+
+  const char *old_path = getenv("PATH");
+  char path_env[4096];
+  snprintf(path_env, sizeof(path_env), "%s:%s", dir, old_path ? old_path : "");
+  assert(run_netwatch_mode_cwd("--once", "--config", config, path_env, out, dir) == 0);
+  assert(access(wifi_marker, F_OK) != 0);
+  char *log_text = must_read(log);
+  assert_contains(log_text, "DRY RUN: would disable Wi-Fi");
+  free(log_text);
+  assert(run_netwatch_mode_cwd("--once", config, NULL, path_env, out, dir) != 0);
+
+  unlink(config); unlink(out); unlink(log); unlink(wifi_marker); unlink(lsof); unlink(networksetup);
+  rmdir(dir);
+  free(config); free(out); free(log); free(wifi_marker); free(lsof); free(networksetup); free(dir);
+}
+
 static void test_audit_mode(void){
   char *dir = temp_dir();
   char *config = join_path_dup(dir, "config.json");
@@ -2070,6 +2213,167 @@ static void test_monitor_stats(void){
   free(config); free(log); free(workspace_root); free(workspace_interpreter); free(workspace_script); free(dir);
 }
 
+static char *daemon_config_text(const char *log_path, int dry_run, int interval, int reload, int exit_on_error){
+  char text[1024];
+  snprintf(text, sizeof(text),
+    "{\"version\":2,\"dryRun\":%s,\"logPath\":\"%s\",\"daemon\":{\"pollIntervalSeconds\":%d,\"reloadOnSighup\":%s,\"exitOnConfigError\":%s},\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n",
+    dry_run ? "true" : "false",
+    log_path,
+    interval,
+    reload ? "true" : "false",
+    exit_on_error ? "true" : "false");
+  return xstrdup(text);
+}
+
+static void test_daemon_mode(void){
+  char *dir = temp_dir();
+  char *log = join_path_dup(dir, "daemon.log");
+  char *base_text = daemon_config_text(log, 1, 1, 1, 0);
+  assert(base_text);
+  char *config = write_config(base_text);
+  free(base_text);
+  FakePlatformState state = { .daemon_stop_after_collects = 3 };
+  NetwatchPlatform platform = fake_platform(&state);
+  Capture cap = capture_daemon(config, &platform);
+  assert(cap.rc == 0);
+  assert(state.collect_calls == 3);
+  assert(state.sleep_calls == 2);
+  assert(state.slept_seconds == 2);
+  assert(state.wifi_calls == 0);
+  capture_free(&cap);
+
+  char *reload_a = daemon_config_text(log, 1, 1, 1, 0);
+  char *reload_b = daemon_config_text(log, 1, 7, 1, 0);
+  assert(reload_a && reload_b);
+  const char *reload_texts[] = {
+    reload_a,
+    reload_b
+  };
+  state = (FakePlatformState){
+    .read_files = reload_texts,
+    .read_file_count = 2,
+    .daemon_reload_after_collects = 1,
+    .daemon_stop_after_collects = 2
+  };
+  platform = fake_platform(&state);
+  cap = capture_daemon(config, &platform);
+  assert(cap.rc == 0);
+  assert(state.read_file_calls == 2);
+  assert(state.collect_calls == 2);
+  assert(state.sleep_calls == 1);
+  assert(state.slept_seconds == 7);
+  capture_free(&cap);
+  free(reload_a); free(reload_b);
+
+  char *invalid_a = daemon_config_text(log, 1, 5, 1, 0);
+  assert(invalid_a);
+  const char *invalid_reload_texts[] = {
+    invalid_a,
+    "{\"version\":2,\"daemon\":{\"pollIntervalSeconds\":0}}\n"
+  };
+  state = (FakePlatformState){
+    .read_files = invalid_reload_texts,
+    .read_file_count = 2,
+    .daemon_reload_after_collects = 1,
+    .daemon_stop_after_collects = 2
+  };
+  platform = fake_platform(&state);
+  cap = capture_daemon(config, &platform);
+  assert(cap.rc == 0);
+  assert(state.read_file_calls == 2);
+  assert(state.collect_calls == 2);
+  assert(state.sleep_calls == 1);
+  assert(state.slept_seconds == 5);
+  assert_contains(cap.err, "daemon.pollIntervalSeconds must be a positive integer");
+  capture_free(&cap);
+  free(invalid_a);
+
+  char *exit_a = daemon_config_text(log, 1, 5, 1, 1);
+  assert(exit_a);
+  const char *exit_reload_texts[] = {
+    exit_a,
+    "{\"version\":2,\"daemon\":{\"pollIntervalSeconds\":0}}\n"
+  };
+  state = (FakePlatformState){
+    .read_files = exit_reload_texts,
+    .read_file_count = 2,
+    .daemon_reload_after_collects = 1,
+    .daemon_stop_after_collects = 3
+  };
+  platform = fake_platform(&state);
+  cap = capture_daemon(config, &platform);
+  assert(cap.rc != 0);
+  assert(state.collect_calls == 1);
+  assert(state.sleep_calls == 0);
+  capture_free(&cap);
+  free(exit_a);
+
+  state = (FakePlatformState){ .daemon_stop_after_collects = 1, .process_path = "/opt/daemon_unknown" };
+  platform = fake_platform(&state);
+  cap = capture_daemon(config, &platform);
+  assert(cap.rc == 0);
+  assert(state.collect_calls == 1);
+  assert(state.wifi_calls == 0);
+  capture_free(&cap);
+
+  char *lock_path = daemon_lock_path_for_config(config);
+  assert(lock_path);
+  int lock_fd = open(lock_path, O_RDWR | O_CREAT, 0600);
+  assert(lock_fd >= 0);
+  assert(flock(lock_fd, LOCK_EX | LOCK_NB) == 0);
+  state = (FakePlatformState){ .daemon_stop_after_collects = 1 };
+  platform = fake_platform(&state);
+  cap = capture_daemon(config, &platform);
+  assert(cap.rc != 0);
+  assert_contains(cap.err, "another netwatch daemon instance is already running");
+  capture_free(&cap);
+  close(lock_fd);
+
+  state = (FakePlatformState){ .daemon_stop_after_collects = 1 };
+  platform = fake_platform(&state);
+  cap = capture_daemon(config, &platform);
+  assert(cap.rc == 0);
+  capture_free(&cap);
+  lock_fd = open(lock_path, O_RDWR | O_CREAT, 0600);
+  assert(lock_fd >= 0);
+  assert(flock(lock_fd, LOCK_EX | LOCK_NB) == 0);
+  close(lock_fd);
+  unlink(lock_path);
+  free(lock_path);
+  unlink(config); unlink(log); rmdir(dir);
+  free(config); free(log); free(dir);
+}
+
+static void test_daemon_lock_path_canonicalizes_config(void){
+  char cwd[PATH_MAX];
+  assert(getcwd(cwd, sizeof(cwd)));
+  char *dir = temp_dir();
+  char *config = join_path_dup(dir, "netwatch.config.json");
+  write_text_mode(config, "{\"version\":2,\"dryRun\":true}\n", 0600);
+  char *absolute_lock = daemon_lock_path_for_config(config);
+  assert(absolute_lock);
+  assert(chdir(dir) == 0);
+  char *relative_lock = daemon_lock_path_for_config("netwatch.config.json");
+  assert(relative_lock);
+  assert(chdir(cwd) == 0);
+  assert(strcmp(absolute_lock, relative_lock) == 0);
+  free(absolute_lock); free(relative_lock);
+  unlink(config); rmdir(dir);
+  free(config); free(dir);
+}
+
+static void test_launchd_daemon_plist(void){
+  char *text = must_read("packaging/launchd/com.sergey.netwatch.plist");
+  assert_contains(text, "<string>/usr/local/bin/netwatch</string>");
+  assert_contains(text, "<string>--daemon</string>");
+  assert_contains(text, "<string>--config</string>");
+  assert_contains(text, "<string>/etc/netwatch/config.json</string>");
+  assert_contains(text, "<key>RunAtLoad</key>");
+  assert_contains(text, "<key>KeepAlive</key>");
+  assert_contains(text, "<key>ThrottleInterval</key>");
+  free(text);
+}
+
 static void test_cli_stats_mode(void){
   char *dir = temp_dir();
   char *config = join_path_dup(dir, "netwatch.config.json");
@@ -2315,6 +2619,7 @@ int main(void){
   test_config_bool();
   test_config_trusted_publishers();
   test_config_trusted_workspaces();
+  test_config_daemon();
   test_trusted_workspace_policy();
   test_config_conversion();
   test_backup_suffix();
@@ -2325,10 +2630,14 @@ int main(void){
   test_why_command();
   test_platform_injection();
   test_cli_dry_run_mode();
+  test_cli_once_mode();
   test_audit_mode();
   test_audit_duration();
   test_cli_audit_mode();
   test_monitor_stats();
+  test_daemon_mode();
+  test_daemon_lock_path_canonicalizes_config();
+  test_launchd_daemon_plist();
   test_cli_stats_mode();
   test_status_command();
   test_status_missing_and_partial();

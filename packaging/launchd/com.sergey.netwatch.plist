@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.sergey.netwatch</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/local/bin/netwatch</string>
+      <string>--daemon</string>
+      <string>--config</string>
+      <string>/etc/netwatch/config.json</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/var/log/netwatch.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/netwatch.err.log</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+  </dict>
+</plist>

@@ -1,6 +1,7 @@
 #ifndef NETWATCH_MONITOR_H
 #define NETWATCH_MONITOR_H
 
+#include "config.h"
 #include "platform.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -29,6 +30,7 @@ typedef struct {
 } MonitorStats;
 
 void monitor_stats_print(const MonitorStats *stats);
+int monitor_scan_config(const Config *cfg, MonitorStats *stats, const NetwatchPlatform *platform);
 int monitor_run_with_stats(const char *cfg_path, bool force_dry_run, MonitorStats *stats, const NetwatchPlatform *platform);
 int monitor_run_with_options(const char *cfg_path, bool force_dry_run, const NetwatchPlatform *platform);
 int monitor_run_with_platform(const char *cfg_path, const NetwatchPlatform *platform);

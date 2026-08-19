@@ -96,6 +96,7 @@ static int top_level_key_rank(const char *key){
   static const char *keys[] = {
     "version",
     "dryRun",
+    "daemon",
     "allowAppleSystemComponents",
     "trustedPublishers",
     "trustedWorkspaces",

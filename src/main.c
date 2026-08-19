@@ -1,6 +1,7 @@
 #include "audit.h"
 #include "config_check.h"
 #include "config_convert.h"
+#include "daemon.h"
 #include "monitor.h"
 #include "status.h"
 #include "why.h"
@@ -13,7 +14,7 @@
 #define DEFAULT_CONFIG_PATH "./netwatch.config.json"
 
 static void print_usage(const char *argv0){
-  fprintf(stderr, "Usage: %s [config.json]\n       %s --dry-run [config.json]\n       %s --stats [config.json]\n       %s --audit [seconds]\n       %s --status\n       %s --convert-config <config.json>\n       %s --check-config <config.json>\n       %s --why <pid-or-executable-path>\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
+  fprintf(stderr, "Usage: %s [config.json]\n       %s --once --config <config.json>\n       %s --daemon --config <config.json>\n       %s --dry-run [config.json]\n       %s --stats [config.json]\n       %s --audit [seconds]\n       %s --status\n       %s --convert-config <config.json>\n       %s --check-config <config.json>\n       %s --why <pid-or-executable-path>\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
 }
 
 static int parse_duration(const char *text, int *out){
@@ -25,6 +26,14 @@ static int parse_duration(const char *text, int *out){
 }
 
 int main(int argc, char **argv){
+  if (argc > 1 && !strcmp(argv[1], "--once")){
+    if (argc != 4 || strcmp(argv[2], "--config")){ print_usage(argv[0]); return 1; }
+    return monitor_run(argv[3]);
+  }
+  if (argc > 1 && !strcmp(argv[1], "--daemon")){
+    if (argc != 4 || strcmp(argv[2], "--config")){ print_usage(argv[0]); return 1; }
+    return daemon_run(argv[3]);
+  }
   if (argc > 1 && !strcmp(argv[1], "--convert-config")){
     if (argc != 3){ print_usage(argv[0]); return 1; }
     return config_convert_in_place(argv[2]);

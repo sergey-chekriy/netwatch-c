@@ -33,6 +33,8 @@ struct NetwatchPlatform {
   int (*disable_wifi)(const NetwatchPlatform *platform, const char *interface, char *err, size_t err_len);
   time_t (*now)(const NetwatchPlatform *platform);
   void (*sleep_seconds)(const NetwatchPlatform *platform, unsigned int seconds);
+  int (*daemon_should_stop)(const NetwatchPlatform *platform);
+  int (*daemon_should_reload)(const NetwatchPlatform *platform);
   int (*launchd_service_loaded)(const NetwatchPlatform *platform, const char *label);
   int (*find_process_by_executable)(const NetwatchPlatform *platform, const char *expected_path, int *pid, char *path, size_t path_size);
 };
