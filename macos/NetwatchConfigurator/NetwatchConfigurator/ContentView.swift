@@ -412,6 +412,7 @@ private struct DiagnosticsView: View {
 private func color(_ indicator: DashboardIndicator) -> Color {
   switch indicator {
   case .green: return .green
+  case .orange: return .orange
   case .red: return .red
   case .gray: return .gray
   }

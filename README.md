@@ -318,7 +318,7 @@ Only the most recent unknown process summary is stored. The snapshot does not in
 
 Menu bar status mapping:
 
-| Status JSON | `dryRun` | Result ok | Fresh: `now - lastScanAt <= pollIntervalSeconds` | Color |
+| Status JSON | `dryRun` | Result ok | Fresh: `now - lastScanAt <= pollIntervalSeconds + 10s` | Color |
 | --- | --- | --- | --- | --- |
 | unavailable / unreadable / invalid | any | any | any | gray |
 | off | yes | yes | green |
@@ -328,8 +328,11 @@ Menu bar status mapping:
 | on | yes | no | red |
 | on | no | any | red |
 
-`daemonRunning` is displayed in the menu but does not control the color. `Result ok` means `configValid=true`, `lastScanResult=ok`, `unknownCount=0`, `wouldDisableWifi=false`, and `wifiDisabled=false`. `dryRun=true` with a clean fresh scan is orange because protection is not enforcing; red is reserved for stale status or actual scan problems. In dry-run, `wifiDisabled` remains `false`; dry-run never disables Wi-Fi.
-The menu also shows the indicator color as text for accessibility. A `Reason` line is shown only when there is a problem or the status snapshot is unavailable.
+`daemonRunning` is displayed in the menu but does not control the color. `Result ok` means `configValid=true`, `lastScanResult=ok`, `unknownCount=0`, `wouldDisableWifi=false`, and `wifiDisabled=false`. The menu bar app allows a 10-second freshness grace so a normal scheduled scan does not flash red while it is finishing. `dryRun=true` with a clean fresh scan is orange because protection is not enforcing; red is reserved for stale status or actual scan problems. In dry-run, `wifiDisabled` remains `false`; dry-run never disables Wi-Fi.
+The menu also shows the indicator color as text for accessibility. A `Reason` line is shown only when there is a problem or the status snapshot is unavailable. Unknown process count is shown only when it is non-zero.
+The menu bar app and SwiftUI configurator use the same Swift status presentation code for this mapping.
+When the top menu row is `Netwatch: problem` or `Netwatch: unavailable`, clicking it opens a detail dialog with the exact reason, freshness, scan result, Wi-Fi action flags, and the most recent unknown process when present.
+If the only issue is a stale last scan, such as after waking a laptop, the menu bar app requests a daemon refresh and shows `Netwatch: refreshing` for up to 20 seconds before treating it as a real problem.
 
 ## Menu bar status indicator
 
@@ -354,6 +357,7 @@ plutil -lint "$HOME/Library/LaunchAgents/com.serg.netwatch.statusbar.plist"
 ```
 
 The example plist points to `/Users/serg/.watch/netwatch-statusbar`; adjust `ProgramArguments` if your install path is different.
+`make install-statusbar` also installs `NetwatchConfigurator.app` into `~/.watch` so the status menu's `Configurator` item has a stable app bundle to open.
 
 Run it directly:
 
@@ -375,7 +379,7 @@ Stop it:
 launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.serg.netwatch.statusbar.plist"
 ```
 
-The indicator reads `~/.watch/netwatch.status.json`. It does not run scans, call `networksetup`, or change Wi-Fi state. The menu refreshes every 5 seconds and includes the current status, dry-run state, last scan result, unknown count, and most recent unknown process summary when present.
+The indicator reads `~/.watch/netwatch.status.json`. It does not run scans, call `networksetup`, or change Wi-Fi state. The status popover refreshes every 5 seconds and includes the current status, dry-run state, last scan result, non-zero unknown process count, and most recent unknown process summary when present.
 
 The `Dry run: on/off` menu item is clickable. It updates only the top-level `dryRun` value in the active config path reported by the status snapshot, writes the config through a temporary file and atomic `rename()`, then requests daemon reload with:
 
@@ -383,7 +387,9 @@ The `Dry run: on/off` menu item is clickable. It updates only the top-level `dry
 launchctl kill SIGHUP "gui/$(id -u)/com.serg.netwatch"
 ```
 
-The menu shows an `Action` line after a save or reload error.
+The popover shows an `Action` line after a save or reload error.
+
+The `Interval: Ns` row is normally static. Click it to edit the seconds value in place, then press Enter to save `daemon.pollIntervalSeconds` or Esc to cancel. Accepted values are 30-1800 seconds. `View log` opens the configured `logPath`, or `$HOME/.watch/netwatch.log` when `logPath` is omitted. `Configurator` opens the first `NetwatchConfigurator.app` found in `~/.watch`, `~/Applications`, `/Applications`, or this repository's `build/` directory.
 
 ## Audit mode
 

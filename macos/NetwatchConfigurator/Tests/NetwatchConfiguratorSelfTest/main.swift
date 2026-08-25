@@ -32,7 +32,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 struct NetwatchConfiguratorSelfTest {
   static func main() async throws {
     try await statusJSONDecodingAndMapping()
-    try dryRunMapsToRedAttention()
+    try dryRunMapsToOrangeAttention()
     try attentionAndErrorMapToRed()
     try await discoveredAppsJSONDecoding()
     try await configSummaryJSONDecoding()
@@ -51,9 +51,10 @@ struct NetwatchConfiguratorSelfTest {
   }
 
   private static func statusJSONDecodingAndMapping() async throws {
+    let now = Int64(Date().timeIntervalSince1970)
     let service = NetwatchService(binaryPath: "/tmp/netwatch", runner: FakeRunner([
       CommandResult(stdout: """
-      {"version":1,"status":"ok","daemonRunning":true,"configValid":true,"dryRun":false,"lastScanAt":10,"lastScanResult":"ok","unknownCount":0,"wouldDisableWifi":false,"wifiDisabled":false,"activeConfigPath":"/tmp/config.json","pollIntervalSeconds":300}
+      {"version":1,"status":"ok","daemonRunning":true,"configValid":true,"dryRun":false,"lastScanAt":\(now),"lastScanResult":"ok","unknownCount":0,"wouldDisableWifi":false,"wifiDisabled":false,"activeConfigPath":"/tmp/config.json","pollIntervalSeconds":300}
       """, stderr: "", exitCode: 0)
     ]))
     let status = try await service.status()
@@ -61,17 +62,19 @@ struct NetwatchConfiguratorSelfTest {
     try expect(DashboardStatusMapper.indicator(for: status) == .green, "ok maps to green")
   }
 
-  private static func dryRunMapsToRedAttention() throws {
+  private static func dryRunMapsToOrangeAttention() throws {
+    let now = Int64(Date().timeIntervalSince1970)
     let status = try JSONDecoder().decode(StatusSnapshot.self, from: Data("""
-    {"version":1,"status":"ok","daemonRunning":true,"configValid":true,"dryRun":true,"lastScanAt":10,"lastScanResult":"ok","unknownCount":0,"wouldDisableWifi":false,"wifiDisabled":false,"activeConfigPath":"/tmp/config.json","pollIntervalSeconds":300}
+    {"version":1,"status":"ok","daemonRunning":true,"configValid":true,"dryRun":true,"lastScanAt":\(now),"lastScanResult":"ok","unknownCount":0,"wouldDisableWifi":false,"wifiDisabled":false,"activeConfigPath":"/tmp/config.json","pollIntervalSeconds":300}
     """.utf8))
-    try expect(DashboardStatusMapper.indicator(for: status) == .red, "dryRun maps to red")
+    try expect(DashboardStatusMapper.indicator(for: status) == .orange, "dryRun maps to orange")
     try expect(DashboardStatusMapper.indicator(for: nil) == .gray, "nil maps to gray")
   }
 
   private static func attentionAndErrorMapToRed() throws {
+    let now = Int64(Date().timeIntervalSince1970)
     let base = """
-    {"version":1,"status":"%@","daemonRunning":true,"configValid":true,"dryRun":false,"lastScanAt":10,"lastScanResult":"ok","unknownCount":0,"wouldDisableWifi":false,"wifiDisabled":false,"activeConfigPath":"/tmp/config.json","pollIntervalSeconds":300}
+    {"version":1,"status":"%@","daemonRunning":true,"configValid":true,"dryRun":false,"lastScanAt":\(now),"lastScanResult":"error","unknownCount":0,"wouldDisableWifi":false,"wifiDisabled":false,"activeConfigPath":"/tmp/config.json","pollIntervalSeconds":300}
     """
     for value in ["attention", "error"] {
       let status = try JSONDecoder().decode(StatusSnapshot.self, from: Data(String(format: base, value).utf8))

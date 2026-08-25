@@ -15,19 +15,13 @@ public struct StatusSnapshot: Decodable, Equatable {
   public let pollIntervalSeconds: Int
 }
 
-public enum DashboardIndicator: String, Equatable {
-  case green
-  case red
-  case gray
-}
+extension StatusSnapshot: NetwatchStatusPresentable {}
+
+public typealias DashboardIndicator = NetwatchStatusIndicator
 
 public enum DashboardStatusMapper {
   public static func indicator(for snapshot: StatusSnapshot?) -> DashboardIndicator {
-    guard let snapshot else { return .gray }
-    if snapshot.dryRun { return .red }
-    if snapshot.status == "ok" { return .green }
-    if snapshot.status == "attention" || snapshot.status == "error" { return .red }
-    return .gray
+    NetwatchStatusPresentation.indicator(for: snapshot)
   }
 }
 

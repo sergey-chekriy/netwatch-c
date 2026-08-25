@@ -2,14 +2,17 @@ import AppKit
 import Darwin
 import Foundation
 
-private struct LastUnknown: Decodable {
+fileprivate struct LastUnknown: Decodable {
   let pid: Int?
   let processName: String?
+  let commandLine: String?
+  let executablePath: String?
+  let cwd: String?
   let remoteEndpoint: String?
   let reason: String?
 }
 
-private struct Snapshot: Decodable {
+fileprivate struct Snapshot: Decodable {
   let status: String
   let daemonRunning: Bool
   let configValid: Bool
@@ -24,18 +27,29 @@ private struct Snapshot: Decodable {
   let lastUnknownProcessSummary: LastUnknown?
 }
 
+extension Snapshot: NetwatchStatusPresentable {}
+
 private struct StatusBarError: LocalizedError {
   let message: String
   var errorDescription: String? { message }
 }
 
+private let minimumPollIntervalSeconds = 30
+private let maximumPollIntervalSeconds = 1800
+private let staleRefreshWindowSeconds: TimeInterval = 20
+
+private let popoverWidth: CGFloat = 330
+
 private final class StatusBarController: NSObject, NSApplicationDelegate {
   private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+  private let popover = NSPopover()
   private let statusURL: URL
   private var timer: Timer?
-  private var lastSnapshot: Snapshot?
-  private var lastError: String?
-  private var lastActionMessage: String?
+  fileprivate var lastSnapshot: Snapshot?
+  fileprivate var lastError: String?
+  fileprivate var lastActionMessage: String?
+  private var staleRefreshRequestedForLastScanAt: Int64?
+  private var staleRefreshRequestedAt: Date?
 
   init(statusPath: String?) {
     if let statusPath, !statusPath.isEmpty {
@@ -50,16 +64,26 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
     item.button?.imagePosition = .imageOnly
+    item.button?.target = self
+    item.button?.action = #selector(togglePopover)
+    popover.behavior = .transient
+    popover.contentSize = NSSize(width: popoverWidth, height: 260)
+    let viewController = NSViewController()
+    viewController.view = StatusPopoverView(controller: self)
+    popover.contentViewController = viewController
     update()
     timer = Timer.scheduledTimer(timeInterval: 5, target: self, selector: #selector(update), userInfo: nil, repeats: true)
     RunLoop.main.add(timer!, forMode: .common)
+    NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(update),
+      name: NSWorkspace.didWakeNotification, object: nil)
   }
 
-  @objc private func update() {
+  @objc fileprivate func update() {
     do {
       let data = try Data(contentsOf: statusURL)
       lastSnapshot = try JSONDecoder().decode(Snapshot.self, from: data)
       lastError = nil
+      if let snapshot = lastSnapshot { requestRefreshIfOnlyStale(snapshot) }
     } catch {
       lastSnapshot = nil
       lastError = error.localizedDescription
@@ -72,59 +96,65 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
     item.button?.image = circleImage(color: color(for: lastSnapshot))
     item.button?.toolTip = tooltip(status: status)
     item.button?.setAccessibilityLabel(accessibilityLabel(status: status))
-    item.menu = menu(status: status)
+    if popover.isShown { popoverView()?.reload() }
   }
 
   private func color(for snapshot: Snapshot?) -> NSColor {
-    guard let snapshot else { return .systemGray }
-    if !scanIsOk(snapshot) || !scanIsFresh(snapshot) { return .systemRed }
-    if snapshot.dryRun { return .systemOrange }
-    return .systemGreen
+    if staleRefreshActive(for: snapshot) { return .systemGray }
+    switch NetwatchStatusPresentation.indicator(for: snapshot) {
+    case .green: return .systemGreen
+    case .orange: return .systemOrange
+    case .red: return .systemRed
+    case .gray: return .systemGray
+    }
   }
 
-  private func displayStatus() -> String {
-    guard let snapshot = lastSnapshot else { return "unavailable" }
-    if !scanIsOk(snapshot) || !scanIsFresh(snapshot) { return "problem" }
-    if snapshot.dryRun { return "dry run" }
-    return "ok"
+  fileprivate func displayStatus() -> String {
+    if staleRefreshActive(for: lastSnapshot) { return "refreshing" }
+    return NetwatchStatusPresentation.displayStatus(for: lastSnapshot)
   }
 
-  private func scanIsOk(_ snapshot: Snapshot) -> Bool {
-    snapshot.configValid && snapshot.lastScanResult == "ok" && snapshot.unknownCount == 0
-      && !snapshot.wouldDisableWifi && !snapshot.wifiDisabled
+  fileprivate func freshnessText(_ snapshot: Snapshot) -> String {
+    NetwatchStatusPresentation.freshnessText(for: snapshot)
   }
 
-  private func scanIsFresh(_ snapshot: Snapshot) -> Bool {
-    if snapshot.lastScanAt <= 0 || snapshot.pollIntervalSeconds <= 0 { return false }
-    return Int64(Date().timeIntervalSince1970) - snapshot.lastScanAt <= Int64(snapshot.pollIntervalSeconds)
+  fileprivate func colorName(_ snapshot: Snapshot?) -> String {
+    if staleRefreshActive(for: snapshot) { return "gray" }
+    return NetwatchStatusPresentation.colorName(for: snapshot)
   }
 
-  private func freshnessText(_ snapshot: Snapshot) -> String {
-    if snapshot.lastScanAt <= 0 { return "no" }
-    let age = max(0, Int64(Date().timeIntervalSince1970) - snapshot.lastScanAt)
-    return scanIsFresh(snapshot) ? "yes (\(age)s old)" : "no (\(age)s old)"
+  fileprivate func problemReason(_ snapshot: Snapshot) -> String? {
+    if staleRefreshActive(for: snapshot) { return nil }
+    return NetwatchStatusPresentation.problemReason(for: snapshot)
   }
 
-  private func colorName(_ snapshot: Snapshot?) -> String {
-    guard let snapshot else { return "gray" }
-    if !scanIsOk(snapshot) || !scanIsFresh(snapshot) { return "red" }
-    if snapshot.dryRun { return "orange" }
-    return "green"
+  private func requestRefreshIfOnlyStale(_ snapshot: Snapshot) {
+    if !isOnlyStale(snapshot) {
+      staleRefreshRequestedForLastScanAt = nil
+      staleRefreshRequestedAt = nil
+      return
+    }
+    if !snapshot.daemonRunning || staleRefreshRequestedForLastScanAt == snapshot.lastScanAt { return }
+    staleRefreshRequestedForLastScanAt = snapshot.lastScanAt
+    staleRefreshRequestedAt = Date()
+    do {
+      try requestDaemonReload()
+      lastActionMessage = "stale status, refresh requested"
+    } catch {
+      lastActionMessage = error.localizedDescription
+    }
   }
 
-  private func staleReason(_ snapshot: Snapshot) -> String? {
-    if scanIsFresh(snapshot) { return nil }
-    if snapshot.lastScanAt <= 0 { return "last scan missing" }
-    return "last scan is older than \(snapshot.pollIntervalSeconds)s"
+  private func isOnlyStale(_ snapshot: Snapshot) -> Bool {
+    NetwatchStatusPresentation.scanIsOk(snapshot)
+      && !NetwatchStatusPresentation.scanIsFresh(snapshot)
   }
 
-  private func problemReason(_ snapshot: Snapshot) -> String? {
-    if !snapshot.configValid { return "config invalid" }
-    if snapshot.lastScanResult != "ok" { return "result \(snapshot.lastScanResult)" }
-    if snapshot.unknownCount > 0 { return "\(snapshot.unknownCount) unknown process(es)" }
-    if snapshot.wouldDisableWifi { return "would disable Wi-Fi" }
-    if snapshot.wifiDisabled { return "Wi-Fi disabled" }
-    return staleReason(snapshot)
+  private func staleRefreshActive(for snapshot: Snapshot?) -> Bool {
+    guard let snapshot, isOnlyStale(snapshot),
+      staleRefreshRequestedForLastScanAt == snapshot.lastScanAt,
+      let requestedAt = staleRefreshRequestedAt else { return false }
+    return Date().timeIntervalSince(requestedAt) < staleRefreshWindowSeconds
   }
 
   private func circleImage(color: NSColor) -> NSImage {
@@ -154,56 +184,33 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
     return "Netwatch \(colorName(snapshot)): \(status)"
   }
 
-  private func menu(status: String) -> NSMenu {
-    let menu = NSMenu()
-    addDisabled(menu, "Netwatch: \(status)")
-    if let snapshot = lastSnapshot {
-      addDisabled(menu, "Indicator: \(colorName(snapshot))")
-      if let reason = problemReason(snapshot) { addDisabled(menu, "Reason: \(reason)") }
-      if let message = lastActionMessage { addDisabled(menu, "Action: \(message)") }
-      addDisabled(menu, "Daemon: \(snapshot.daemonRunning ? "running" : "stopped")")
-      addDryRunToggle(menu, snapshot)
-      addDisabled(menu, "Last scan: \(formatTime(snapshot.lastScanAt))")
-      addDisabled(menu, "Fresh: \(freshnessText(snapshot))")
-      addDisabled(menu, "Result: \(snapshot.lastScanResult)")
-      addDisabled(menu, "Unknown: \(snapshot.unknownCount)")
-      if let unknown = snapshot.lastUnknownProcessSummary {
-        menu.addItem(.separator())
-        addDisabled(menu, "Last unknown: \(unknown.processName ?? "unknown")")
-        if let remote = unknown.remoteEndpoint { addDisabled(menu, "Remote: \(remote)") }
-        if let reason = unknown.reason { addDisabled(menu, "Reason: \(reason)") }
-      }
-      addDisabled(menu, "Interval: \(snapshot.pollIntervalSeconds)s")
+  @objc private func togglePopover() {
+    guard let button = item.button else { return }
+    if popover.isShown {
+      popover.performClose(nil)
     } else {
-      addDisabled(menu, lastError ?? "status snapshot unavailable")
-      addDisabled(menu, statusURL.path)
+      update()
+      popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+      NSApp.activate(ignoringOtherApps: true)
     }
-    menu.addItem(.separator())
-    let refresh = NSMenuItem(title: "Refresh", action: #selector(update), keyEquivalent: "r")
-    refresh.target = self
-    menu.addItem(refresh)
-    let quit = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
-    quit.target = self
-    menu.addItem(quit)
-    return menu
   }
 
-  private func addDryRunToggle(_ menu: NSMenu, _ snapshot: Snapshot) {
-    let item = NSMenuItem(title: "Dry run: \(snapshot.dryRun ? "on" : "off")",
-                          action: #selector(toggleDryRun), keyEquivalent: "")
-    item.target = self
-    item.state = snapshot.dryRun ? .on : .off
-    item.isEnabled = snapshot.configValid && !snapshot.activeConfigPath.isEmpty
-    menu.addItem(item)
+  fileprivate func resizePopover(height: CGFloat) {
+    popover.contentSize = NSSize(width: popoverWidth, height: height)
   }
 
-  private func addDisabled(_ menu: NSMenu, _ title: String) {
-    let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-    item.isEnabled = false
-    menu.addItem(item)
+  private func popoverView() -> StatusPopoverView? {
+    popover.contentViewController?.view as? StatusPopoverView
   }
 
-  private func formatTime(_ seconds: Int64) -> String {
+  fileprivate func statusDetailsAvailable() -> Bool {
+    guard let snapshot = lastSnapshot else { return true }
+    return problemReason(snapshot) != nil
+  }
+
+  fileprivate var statusPathText: String { statusURL.path }
+
+  fileprivate func formatTime(_ seconds: Int64) -> String {
     if seconds <= 0 { return "never" }
     let formatter = DateFormatter()
     formatter.dateStyle = .none
@@ -211,7 +218,7 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
     return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(seconds)))
   }
 
-  @objc private func toggleDryRun() {
+  @objc fileprivate func toggleDryRun() {
     guard let snapshot = lastSnapshot else { lastActionMessage = "status unavailable"; render(); return }
     do {
       try setDryRun(!snapshot.dryRun, configPath: snapshot.activeConfigPath)
@@ -224,18 +231,165 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
     }
   }
 
+  @objc fileprivate func showStatusDetails() {
+    NSApp.activate(ignoringOtherApps: true)
+    let alert = NSAlert()
+    alert.messageText = "Netwatch status details"
+    alert.informativeText = statusDetailsText()
+    alert.addButton(withTitle: "OK")
+    alert.runModal()
+  }
+
+  private func statusDetailsText() -> String {
+    guard let snapshot = lastSnapshot else {
+      return [
+        "Status: unavailable",
+        "Indicator: gray",
+        "Error: \(lastError ?? "status snapshot unavailable")",
+        "Status file: \(statusURL.path)"
+      ].joined(separator: "\n")
+    }
+
+    var lines = [
+      "Status: \(displayStatus())",
+      "Indicator: \(colorName(snapshot))",
+      "Reason: \(problemReason(snapshot) ?? "no problem")",
+      "Config valid: \(snapshot.configValid ? "yes" : "no")",
+      "Daemon: \(snapshot.daemonRunning ? "running" : "stopped")",
+      "Dry run: \(snapshot.dryRun ? "on" : "off")",
+      "Last scan: \(formatTime(snapshot.lastScanAt))",
+      "Fresh: \(freshnessText(snapshot))",
+      "Result: \(snapshot.lastScanResult)",
+      "Unknown processes: \(snapshot.unknownCount)",
+      "Would disable Wi-Fi: \(snapshot.wouldDisableWifi ? "yes" : "no")",
+      "Wi-Fi disabled: \(snapshot.wifiDisabled ? "yes" : "no")"
+    ]
+    if let unknown = snapshot.lastUnknownProcessSummary {
+      lines.append("")
+      lines.append("Last unknown: \(unknownDisplayName(unknown))")
+      if let pid = unknown.pid { lines.append("PID: \(pid)") }
+      if let command = unknown.commandLine, !command.isEmpty { lines.append("Command: \(command)") }
+      if let path = unknown.executablePath, !path.isEmpty { lines.append("Path: \(path)") }
+      if let cwd = unknown.cwd, !cwd.isEmpty { lines.append("CWD: \(cwd)") }
+      if let remote = unknown.remoteEndpoint { lines.append("Remote: \(remote)") }
+      if let reason = unknown.reason { lines.append("Unknown reason: \(reason)") }
+    }
+    return lines.joined(separator: "\n")
+  }
+
+  fileprivate func unknownDisplayName(_ unknown: LastUnknown) -> String {
+    if let path = unknown.executablePath, !path.isEmpty {
+      return URL(fileURLWithPath: path).lastPathComponent
+    }
+    if let command = unknown.commandLine, let first = command.split(separator: " ").first {
+      return URL(fileURLWithPath: String(first)).lastPathComponent
+    }
+    return unknown.processName ?? "unknown"
+  }
+
+  fileprivate func saveInterval(_ text: String) -> Bool {
+    guard let snapshot = lastSnapshot else { lastActionMessage = "status unavailable"; return false }
+    guard let seconds = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+      lastActionMessage = "interval must be a number"; return false
+    }
+    if seconds == configuredPollIntervalSeconds(snapshot) { return true }
+    do {
+      try setPollInterval(seconds, configPath: snapshot.activeConfigPath)
+      try requestDaemonReload()
+      lastActionMessage = "interval saved: \(seconds)s, reload requested"
+      return true
+    } catch {
+      lastActionMessage = error.localizedDescription
+      return false
+    }
+  }
+
+  @objc fileprivate func viewLog() {
+    let url = logURL()
+    if FileManager.default.fileExists(atPath: url.path) && NSWorkspace.shared.open(url) {
+      lastActionMessage = "opened log"
+    } else {
+      lastActionMessage = "log not found: \(url.path)"
+    }
+    render()
+  }
+
+  @objc fileprivate func openConfigurator() {
+    guard let url = configuratorURL() else {
+      lastActionMessage = "Configurator app not found"; render(); return
+    }
+    if !NSWorkspace.shared.open(url) {
+      lastActionMessage = "failed to open Configurator"
+    } else {
+      lastActionMessage = "opened Configurator"
+    }
+    render()
+  }
+
   private func setDryRun(_ value: Bool, configPath: String) throws {
+    try updateConfig(configPath: configPath) { root in root["dryRun"] = value }
+  }
+
+  private func setPollInterval(_ seconds: Int, configPath: String) throws {
+    if seconds < minimumPollIntervalSeconds || seconds > maximumPollIntervalSeconds {
+      throw StatusBarError(message: "interval must be \(minimumPollIntervalSeconds)-\(maximumPollIntervalSeconds)s")
+    }
+    try updateConfig(configPath: configPath) { root in
+      var daemon = root["daemon"] as? [String: Any] ?? [:]
+      daemon["pollIntervalSeconds"] = seconds
+      root["daemon"] = daemon
+    }
+  }
+
+  private func updateConfig(configPath: String, change: (inout [String: Any]) throws -> Void) throws {
     if configPath.isEmpty { throw StatusBarError(message: "active config path missing") }
     let url = URL(fileURLWithPath: NSString(string: configPath).expandingTildeInPath)
     let data = try Data(contentsOf: url)
     guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
       throw StatusBarError(message: "config root is not an object")
     }
-    root["dryRun"] = value
+    try change(&root)
     var out = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
     out.append(0x0a)
     _ = try JSONSerialization.jsonObject(with: out)
     try writeAtomically(out, to: url)
+  }
+
+  fileprivate func configuredPollIntervalSeconds(_ snapshot: Snapshot) -> Int {
+    guard !snapshot.activeConfigPath.isEmpty else { return snapshot.pollIntervalSeconds }
+    let url = URL(fileURLWithPath: NSString(string: snapshot.activeConfigPath).expandingTildeInPath)
+    guard let data = try? Data(contentsOf: url),
+          let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let daemon = root["daemon"] as? [String: Any] else { return snapshot.pollIntervalSeconds }
+    if let seconds = daemon["pollIntervalSeconds"] as? Int { return seconds }
+    if let seconds = daemon["pollIntervalSeconds"] as? NSNumber { return seconds.intValue }
+    return snapshot.pollIntervalSeconds
+  }
+
+  private func logURL() -> URL {
+    if let snapshot = lastSnapshot, !snapshot.activeConfigPath.isEmpty,
+       let data = try? Data(contentsOf: URL(fileURLWithPath: NSString(string: snapshot.activeConfigPath).expandingTildeInPath)),
+       let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+       let path = root["logPath"] as? String, !path.isEmpty {
+      return URL(fileURLWithPath: NSString(string: path).expandingTildeInPath)
+    }
+    return FileManager.default.homeDirectoryForCurrentUser
+      .appendingPathComponent(".watch/netwatch.log")
+  }
+
+  private func configuratorURL() -> URL? {
+    let home = FileManager.default.homeDirectoryForCurrentUser
+    let candidates = [
+      home.appendingPathComponent(".watch/NetwatchConfigurator.app"),
+      home.appendingPathComponent("Applications/NetwatchConfigurator.app"),
+      URL(fileURLWithPath: "/Applications/NetwatchConfigurator.app"),
+      URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .appendingPathComponent("build/NetwatchConfigurator.app")
+    ]
+    return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
   }
 
   private func writeAtomically(_ data: Data, to url: URL) throws {
@@ -301,10 +455,275 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
     StatusBarError(message: "\(operation) failed for \(path): \(String(cString: strerror(errno)))")
   }
 
-  @objc private func quit() { NSApp.terminate(nil) }
+  @objc fileprivate func quit() { NSApp.terminate(nil) }
 }
 
-private let controller = StatusBarController(statusPath: CommandLine.arguments.dropFirst().first)
-private let app = NSApplication.shared
-app.delegate = controller
-app.run()
+private final class PopoverRow: NSView {
+  private let titleLabel = NSTextField(labelWithString: "")
+  private let shortcutLabel = NSTextField(labelWithString: "")
+  private let callback: (() -> Void)?
+  private let rowEnabled: Bool
+  private var highlighted = false
+
+  init(_ title: String, checked: Bool = false, shortcut: String? = nil,
+       enabled: Bool = true, callback: (() -> Void)? = nil) {
+    self.callback = callback
+    self.rowEnabled = enabled && callback != nil
+    super.init(frame: NSRect(x: 0, y: 0, width: popoverWidth, height: 32))
+    wantsLayer = true
+    titleLabel.stringValue = checked ? "✓ \(title)" : title
+    titleLabel.font = NSFont.systemFont(ofSize: 15, weight: callback == nil ? .regular : .semibold)
+    titleLabel.textColor = rowEnabled ? .labelColor : .secondaryLabelColor
+    titleLabel.lineBreakMode = .byTruncatingTail
+    titleLabel.frame = NSRect(x: 22, y: 7, width: 230, height: 18)
+    addSubview(titleLabel)
+    if let shortcut {
+      shortcutLabel.stringValue = shortcut
+      shortcutLabel.font = NSFont.systemFont(ofSize: 15, weight: .regular)
+      shortcutLabel.textColor = .secondaryLabelColor
+      shortcutLabel.alignment = .right
+      shortcutLabel.frame = NSRect(x: 260, y: 7, width: 48, height: 18)
+      addSubview(shortcutLabel)
+    }
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    if rowEnabled && bounds.contains(point) { return self }
+    return super.hitTest(point)
+  }
+
+  override func updateTrackingAreas() {
+    super.updateTrackingAreas()
+    trackingAreas.forEach { removeTrackingArea($0) }
+    addTrackingArea(NSTrackingArea(rect: bounds,
+      options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+      owner: self, userInfo: nil))
+  }
+
+  override func mouseEntered(with event: NSEvent) { setHighlighted(true) }
+  override func mouseExited(with event: NSEvent) { setHighlighted(false) }
+
+  override func mouseDown(with event: NSEvent) {
+    if rowEnabled { callback?() }
+  }
+
+  override func draw(_ dirtyRect: NSRect) {
+    if highlighted {
+      NSColor.controlAccentColor.setFill()
+      bounds.insetBy(dx: 6, dy: 1).fill()
+    }
+    super.draw(dirtyRect)
+  }
+
+  private func setHighlighted(_ value: Bool) {
+    highlighted = value && rowEnabled
+    titleLabel.textColor = highlighted ? .selectedMenuItemTextColor
+      : (rowEnabled ? .labelColor : .secondaryLabelColor)
+    needsDisplay = true
+  }
+}
+
+private final class SeparatorRow: NSView {
+  init() {
+    super.init(frame: NSRect(x: 0, y: 0, width: popoverWidth, height: 11))
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func draw(_ dirtyRect: NSRect) {
+    NSColor.separatorColor.setStroke()
+    let path = NSBezierPath()
+    path.move(to: NSPoint(x: 18, y: 5.5))
+    path.line(to: NSPoint(x: popoverWidth - 18, y: 5.5))
+    path.stroke()
+  }
+}
+
+private final class StatusPopoverView: NSView, NSTextFieldDelegate {
+  private weak var controller: StatusBarController?
+  private var editingInterval = false
+  private var intervalText = ""
+  private var intervalError: String?
+  private var rebuilding = false
+  private weak var intervalField: NSTextField?
+  private var nextY: CGFloat = 8
+
+  init(controller: StatusBarController) {
+    self.controller = controller
+    super.init(frame: NSRect(x: 0, y: 0, width: popoverWidth, height: 260))
+    reload(force: true)
+  }
+
+  required init?(coder: NSCoder) { nil }
+  override var isFlipped: Bool { true }
+
+  func reload(force: Bool = false) {
+    if editingInterval && !force { return }
+    rebuilding = true
+    defer { rebuilding = false }
+    subviews.forEach { $0.removeFromSuperview() }
+    nextY = 8
+    guard let controller else { return }
+    addHeader(controller)
+    if let snapshot = controller.lastSnapshot {
+      addInfo("Indicator: \(controller.colorName(snapshot))")
+      if let reason = controller.problemReason(snapshot) { addInfo("Reason: \(reason)") }
+      if let message = controller.lastActionMessage { addInfo("Action: \(message)") }
+      addInfo("Daemon: \(snapshot.daemonRunning ? "running" : "stopped")")
+      addRow("Dry run: \(snapshot.dryRun ? "on" : "off")", checked: snapshot.dryRun,
+             enabled: snapshot.configValid && !snapshot.activeConfigPath.isEmpty) {
+        controller.toggleDryRun()
+      }
+      addInfo("Last scan: \(controller.formatTime(snapshot.lastScanAt))")
+      addInfo("Fresh: \(controller.freshnessText(snapshot))")
+      addInfo("Result: \(snapshot.lastScanResult)")
+      if snapshot.unknownCount > 0 { addInfo("Unknown processes: \(snapshot.unknownCount)") }
+      if let unknown = snapshot.lastUnknownProcessSummary {
+        addSeparator()
+        addInfo("Last unknown: \(controller.unknownDisplayName(unknown))")
+        if let remote = unknown.remoteEndpoint { addInfo("Remote: \(remote)") }
+        if let reason = unknown.reason { addInfo("Reason: \(reason)") }
+      }
+      addInterval(snapshot, controller)
+    } else {
+      addInfo(controller.lastError ?? "status snapshot unavailable")
+      addInfo(controller.statusPathText)
+    }
+    addSeparator()
+    addRow("Refresh", shortcut: "⌘ R") { controller.update() }
+    addRow("View log", shortcut: "⌘ L") { controller.viewLog() }
+    addRow("Configurator") { controller.openConfigurator() }
+    addRow("Quit", shortcut: "⌘ Q") { controller.quit() }
+    setFrameSize(NSSize(width: popoverWidth, height: nextY + 8))
+    controller.resizePopover(height: frame.height)
+  }
+
+  private func addHeader(_ controller: StatusBarController) {
+    let title = "Netwatch: \(controller.displayStatus())"
+    if controller.statusDetailsAvailable() {
+      addRow(title) { controller.showStatusDetails() }
+    } else {
+      addInfo(title, weight: .semibold)
+    }
+  }
+
+  private func addInterval(_ snapshot: Snapshot, _ controller: StatusBarController) {
+    let enabled = snapshot.configValid && !snapshot.activeConfigPath.isEmpty
+    let seconds = controller.configuredPollIntervalSeconds(snapshot)
+    if editingInterval {
+      addIntervalEditor()
+    } else {
+      addRow("Interval: \(seconds)s", enabled: enabled) { [weak self] in
+        self?.editingInterval = true
+        self?.intervalText = "\(seconds)"
+        self?.intervalError = nil
+        self?.reload(force: true)
+      }
+    }
+    if let intervalError { addInfo(intervalError) }
+  }
+
+  private func addIntervalEditor() {
+    let row = NSView(frame: NSRect(x: 0, y: 0, width: popoverWidth, height: 34))
+    let label = NSTextField(labelWithString: "Interval:")
+    label.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+    label.frame = NSRect(x: 22, y: 8, width: 100, height: 18)
+    row.addSubview(label)
+    let field = NSTextField(frame: NSRect(x: 140, y: 4, width: 74, height: 24))
+    field.stringValue = intervalText
+    field.alignment = .right
+    field.delegate = self
+    row.addSubview(field)
+    let suffix = NSTextField(labelWithString: "s")
+    suffix.font = NSFont.systemFont(ofSize: 15, weight: .semibold)
+    suffix.frame = NSRect(x: 222, y: 8, width: 20, height: 18)
+    row.addSubview(suffix)
+    intervalField = field
+    add(row)
+    DispatchQueue.main.async { [weak self, weak field] in
+      guard let self, let field else { return }
+      self.window?.makeFirstResponder(field)
+      field.selectText(nil)
+    }
+  }
+
+  @objc private func saveInterval() {
+    guard let controller, let field = intervalField else { return }
+    intervalText = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let seconds = Int(intervalText) else { rejectInterval("Interval must be a number"); return }
+    guard seconds >= minimumPollIntervalSeconds && seconds <= maximumPollIntervalSeconds else {
+      rejectInterval("Interval must be \(minimumPollIntervalSeconds)-\(maximumPollIntervalSeconds)s")
+      return
+    }
+    if controller.saveInterval(intervalText) {
+      editingInterval = false
+      intervalError = nil
+      controller.update()
+      reload(force: true)
+    } else {
+      rejectInterval(controller.lastActionMessage ?? "Failed to save interval")
+    }
+  }
+
+  private func rejectInterval(_ message: String) {
+    NSSound.beep()
+    intervalError = message
+    reload(force: true)
+  }
+
+  func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+    if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+      saveInterval()
+      return true
+    }
+    if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+      editingInterval = false
+      intervalError = nil
+      reload(force: true)
+      return true
+    }
+    return false
+  }
+
+  private func addInfo(_ text: String, weight: NSFont.Weight = .regular) {
+    let label = NSTextField(labelWithString: text)
+    label.font = NSFont.systemFont(ofSize: 15, weight: weight)
+    label.textColor = .secondaryLabelColor
+    label.lineBreakMode = .byTruncatingTail
+    label.frame = NSRect(x: 22, y: 5, width: popoverWidth - 44, height: 18)
+    let row = NSView(frame: NSRect(x: 0, y: 0, width: popoverWidth, height: 28))
+    row.addSubview(label)
+    add(row)
+  }
+
+  private func addRow(_ text: String, checked: Bool = false, shortcut: String? = nil,
+                      enabled: Bool = true, callback: @escaping () -> Void) {
+    add(PopoverRow(text, checked: checked, shortcut: shortcut, enabled: enabled, callback: callback))
+  }
+
+  private func addSeparator() {
+    add(SeparatorRow())
+  }
+
+  private func add(_ view: NSView) {
+    view.frame.origin = NSPoint(x: 0, y: nextY)
+    view.frame.size.width = popoverWidth
+    addSubview(view)
+    nextY += view.frame.height
+  }
+}
+
+@main
+private struct NetwatchStatusBarApp {
+  private static var controller: StatusBarController?
+
+  static func main() {
+    controller = StatusBarController(statusPath: CommandLine.arguments.dropFirst().first)
+    NSApplication.shared.delegate = controller
+    NSApplication.shared.run()
+  }
+}

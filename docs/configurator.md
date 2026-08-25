@@ -15,6 +15,14 @@ The app bundle is written to:
 build/NetwatchConfigurator.app
 ```
 
+`make install-statusbar` also installs a copy at:
+
+```bash
+~/.watch/NetwatchConfigurator.app
+```
+
+The menu bar app opens that installed copy from its `Configurator` menu item.
+
 When testing a freshly rebuilt app, quit any existing configurator process with
 `Cmd+Q` first, or start a separate fresh instance:
 
@@ -64,7 +72,7 @@ It shows daemon state, protection status, dryRun, last scan, unknown process cou
 
 Status colors:
 
-| Dry run | Result ok | Fresh scan | Indicator |
+| Dry run | Result ok | Fresh scan (`lastScanAt <= interval + 10s`) | Indicator |
 | --- | --- | --- | --- |
 | unavailable / unreadable / invalid | any | any | gray |
 | off | yes | yes | green |
@@ -74,7 +82,8 @@ Status colors:
 | on | yes | no | red |
 | on | no | any | red |
 
-`daemonRunning` is displayed but does not control the color. `Result ok` means `configValid=true`, `lastScanResult=ok`, `unknownCount=0`, `wouldDisableWifi=false`, and `wifiDisabled=false`. `dryRun=true` with a clean fresh scan is orange because protection is not enforcing; red is reserved for stale status or actual scan problems.
+`daemonRunning` is displayed but does not control the color. `Result ok` means `configValid=true`, `lastScanResult=ok`, `unknownCount=0`, `wouldDisableWifi=false`, and `wifiDisabled=false`. The menu bar app allows a 10-second freshness grace while a scheduled scan is finishing. `dryRun=true` with a clean fresh scan is orange because protection is not enforcing; red is reserved for stale status or actual scan problems.
+The menu bar app and configurator share the same Swift status presentation code for this mapping.
 
 The dashboard can refresh status, check config, open the config file, open the watch directory, and reload the daemon.
 
