@@ -36,6 +36,7 @@ struct NetwatchConfiguratorSelfTest {
     try attentionAndErrorMapToRed()
     try await discoveredAppsJSONDecoding()
     try await configSummaryJSONDecoding()
+    try trustedPublisherLookupUsesExecutablePath()
     try await runnerFailureIsStructured()
     try await timeoutHandling()
     try await fakeRunnerSuccessRecordsArguments()
@@ -96,13 +97,14 @@ struct NetwatchConfiguratorSelfTest {
   private static func configSummaryJSONDecoding() async throws {
     let service = NetwatchService(binaryPath: "/tmp/netwatch", runner: FakeRunner([
       CommandResult(stdout: """
-      {"version":2,"dryRun":true,"daemon":{"pollIntervalSeconds":300,"reloadOnSighup":true,"exitOnConfigError":false},"allowAppleSystemComponents":true,"interface":"Wi-Fi","logPath":"/tmp/netwatch.log","denyPatterns":["bad"],"allowRemoteHosts":["17."],"allowProcesses":{"ssh":"/usr/bin/ssh","tool":["/a","/b"]},"trustedPublishers":{"Chrome":{"paths":["/a"],"teamId":"TEAM","signingIdentifier":"id"}},"trustedWorkspaces":{"scripts":{"roots":["/r"],"allowSubdirectories":true,"interpreters":["/bin/zsh"],"allowByCwdOnly":false}}}
+      {"version":2,"dryRun":true,"daemon":{"pollIntervalSeconds":300,"reloadOnSighup":true,"exitOnConfigError":false},"allowAppleSystemComponents":true,"interface":"Wi-Fi","logPath":"/tmp/netwatch.log","verboseLog":true,"denyPatterns":["bad"],"allowRemoteHosts":["17."],"allowProcesses":{"ssh":"/usr/bin/ssh","tool":["/a","/b"]},"trustedPublishers":{"Chrome":{"paths":["/a"],"teamId":"TEAM","signingIdentifier":"id"}},"trustedWorkspaces":{"scripts":{"roots":["/r"],"allowSubdirectories":true,"interpreters":["/bin/zsh"],"allowByCwdOnly":false}}}
       """, stderr: "", exitCode: 0)
     ]))
     let summary = try await service.configSummary(configPath: "/tmp/config.json")
     try expect(summary.allowAppleSystemComponents == true, "apple trust decode")
     try expect(summary.interface == "Wi-Fi", "interface decode")
     try expect(summary.logPath == "/tmp/netwatch.log", "log path decode")
+    try expect(summary.verboseLog == true, "verbose log decode")
     try expect(summary.denyPatterns == ["bad"], "deny patterns decode")
     try expect(summary.allowRemoteHosts == ["17."], "remote hosts decode")
     try expect(summary.daemon?.reloadOnSighup == true, "daemon reload decode")
@@ -111,6 +113,17 @@ struct NetwatchConfiguratorSelfTest {
     try expect(summary.workspaceItems.map(\.name) == ["scripts"], "workspace summary decode")
     try expect(summary.allowProcessItems.map(\.name) == ["ssh", "tool"], "allow process summary decode")
     try expect(summary.allowProcesses?["tool"]?.paths == ["/a", "/b"], "allow process array decode")
+  }
+
+  @MainActor private static func trustedPublisherLookupUsesExecutablePath() throws {
+    let viewModel = ConfiguratorViewModel(service: NetwatchService(binaryPath: "/tmp/netwatch", runner: FakeRunner([])))
+    viewModel.config = try JSONDecoder().decode(ConfigSummary.self, from: Data(#"""
+    {"trustedPublishers":{"\u200eWhatsApp":{"paths":["/Applications/WhatsApp.app/Contents/MacOS/WhatsApp"],"teamId":"57T9237FN3","signingIdentifier":"net.whatsapp.WhatsApp"}}}
+    """#.utf8))
+    let app = try JSONDecoder().decode(DiscoveredApp.self, from: Data("""
+    {"displayName":"WhatsApp","bundlePath":"/Applications/WhatsApp.app","executablePath":"/Applications/WhatsApp.app/Contents/MacOS/WhatsApp","signingIdentifier":"net.whatsapp.WhatsApp","teamId":"57T9237FN3","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true}
+    """.utf8))
+    try expect(viewModel.trustedPublisherName(for: app) == "\u{200E}WhatsApp", "trusted publisher path lookup")
   }
 
   private static func runnerFailureIsStructured() async throws {
@@ -148,11 +161,12 @@ struct NetwatchConfiguratorSelfTest {
   private static func advancedSettingsCommands() async throws {
     let config = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString).path
     FileManager.default.createFile(atPath: config, contents: Data("{}".utf8))
-    let runner = FakeRunner(Array(repeating: CommandResult(stdout: "ok\n", stderr: "", exitCode: 0), count: 7))
+    let runner = FakeRunner(Array(repeating: CommandResult(stdout: "ok\n", stderr: "", exitCode: 0), count: 8))
     let service = NetwatchService(binaryPath: "/tmp/netwatch", runner: runner)
     _ = try await service.setAppleSystemTrust(true, configPath: config)
     _ = try await service.setInterface("Wi-Fi", configPath: config)
     _ = try await service.setLogPath("/tmp/netwatch.log", configPath: config)
+    _ = try await service.setVerboseLog(true, configPath: config)
     _ = try await service.setDaemonReloadOnSighup(false, configPath: config)
     _ = try await service.setDaemonExitOnConfigError(true, configPath: config)
     _ = try await service.setDenyPatterns(["bad", ":4444"], configPath: config)
@@ -160,10 +174,11 @@ struct NetwatchConfiguratorSelfTest {
     try expect(runner.calls[0].1 == ["--config-set-apple-system-trust", "true", "--config", config], "set apple trust args")
     try expect(runner.calls[1].1 == ["--config-set-interface", "Wi-Fi", "--config", config], "set interface args")
     try expect(runner.calls[2].1 == ["--config-set-log-path", "/tmp/netwatch.log", "--config", config], "set log path args")
-    try expect(runner.calls[3].1 == ["--config-set-daemon-reload-on-sighup", "false", "--config", config], "set daemon reload args")
-    try expect(runner.calls[4].1 == ["--config-set-daemon-exit-on-config-error", "true", "--config", config], "set daemon exit args")
-    try expect(runner.calls[5].1 == ["--config-set-deny-patterns", "--value", "bad", "--value", ":4444", "--config", config], "set deny args")
-    try expect(runner.calls[6].1 == ["--config-set-allow-remote-hosts", "--value", "17.", "--config", config], "set remote args")
+    try expect(runner.calls[3].1 == ["--config-set-verbose-log", "true", "--config", config], "set verbose log args")
+    try expect(runner.calls[4].1 == ["--config-set-daemon-reload-on-sighup", "false", "--config", config], "set daemon reload args")
+    try expect(runner.calls[5].1 == ["--config-set-daemon-exit-on-config-error", "true", "--config", config], "set daemon exit args")
+    try expect(runner.calls[6].1 == ["--config-set-deny-patterns", "--value", "bad", "--value", ":4444", "--config", config], "set deny args")
+    try expect(runner.calls[7].1 == ["--config-set-allow-remote-hosts", "--value", "17.", "--config", config], "set remote args")
   }
 
   private static func allowProcessCommands() async throws {

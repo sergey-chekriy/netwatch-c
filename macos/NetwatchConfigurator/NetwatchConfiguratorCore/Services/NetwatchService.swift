@@ -85,6 +85,14 @@ public final class NetwatchService {
     ]))
   }
 
+  public func setVerboseLog(_ value: Bool, configPath: String) async throws -> String {
+    try ensureWritable(configPath)
+    return try checked(await run(arguments: [
+      "--config-set-verbose-log", value ? "true" : "false",
+      "--config", configPath
+    ]))
+  }
+
   public func setPollInterval(_ seconds: Int, configPath: String) async throws -> String {
     try ensureWritable(configPath)
     return try checked(await run(arguments: [

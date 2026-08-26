@@ -923,6 +923,7 @@ static void test_config_bool(void){
   char *path = write_config("{\"dryRun\":true}");
   assert(config_load(&cfg, path, err, sizeof(err)));
   assert(!cfg.allow_apple_system_components);
+  assert(!cfg.verbose_log);
   config_free(&cfg);
   assert(unlink(path) == 0);
   free(path);
@@ -963,6 +964,19 @@ static void test_config_bool(void){
   path = write_config("{\"allowAppleSystemComponents\":\"yes\"}");
   assert(!config_load(&cfg, path, err, sizeof(err)));
   assert(strstr(err, "allowAppleSystemComponents must be boolean"));
+  assert(unlink(path) == 0);
+  free(path);
+
+  path = write_config("{\"verboseLog\":true}");
+  assert(config_load(&cfg, path, err, sizeof(err)));
+  assert(cfg.verbose_log);
+  config_free(&cfg);
+  assert(unlink(path) == 0);
+  free(path);
+
+  path = write_config("{\"verboseLog\":\"yes\"}");
+  assert(!config_load(&cfg, path, err, sizeof(err)));
+  assert(strstr(err, "verboseLog must be boolean"));
   assert(unlink(path) == 0);
   free(path);
 }
@@ -1269,6 +1283,11 @@ static int call_set_apple_trust(void *ctx){
   return config_backend_set_apple_system_trust(c->path, c->value, c->platform);
 }
 
+static int call_set_verbose_log(void *ctx){
+  DryRunCtx *c = ctx;
+  return config_backend_set_verbose_log(c->path, c->value, c->platform);
+}
+
 typedef struct { const char *path; int seconds; const NetwatchPlatform *platform; } PollCtx;
 static int call_set_poll(void *ctx){
   PollCtx *c = ctx;
@@ -1517,6 +1536,15 @@ static void test_config_backend_editing(void){
   assert_contains(cap.out, "allowAppleSystemComponents -> true");
   text = must_read(config);
   assert_contains(text, "\"allowAppleSystemComponents\": true");
+  free(text);
+  capture_free(&cap);
+
+  DryRunCtx verbose = { config, 1, &platform };
+  cap = capture_call(call_set_verbose_log, &verbose);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "verboseLog -> true");
+  text = must_read(config);
+  assert_contains(text, "\"verboseLog\": true");
   free(text);
   capture_free(&cap);
 
@@ -1905,6 +1933,7 @@ static void test_deterministic_json_formatting(void){
     "{\n"
     "  \"zUnknown\": {\"beta\": false, \"alpha\": true},\n"
     "  \"dryRun\": true,\n"
+    "  \"verboseLog\": true,\n"
     "  \"daemon\": {\"reloadOnSighup\": true, \"pollIntervalSeconds\": 11, \"exitOnConfigError\": false},\n"
     "  \"trustedPublishers\": {\n"
     "    \"BetaPub\": {\"teamId\": \"BTEAM\", \"signingIdentifier\": \"com.beta\", \"paths\": [\"/Applications/Beta.app/Contents/MacOS/Beta\"]},\n"
@@ -1918,6 +1947,7 @@ static void test_deterministic_json_formatting(void){
     "    \"Beta\": \"/Applications/Beta.app/Contents/*\",\n"
     "    \"Alpha\": [\"array-second\", \"array-first\"]\n"
     "  },\n"
+    "  \"logPath\": \"/tmp/netwatch-order.log\",\n"
     "  \"allowRemoteHosts\": [\"2\", \"1\"],\n"
     "  \"denyPatterns\": [\"deny-b\", \"deny-a\"]\n"
     "}\n";
@@ -1931,6 +1961,8 @@ static void test_deterministic_json_formatting(void){
     "  \"denyPatterns\": [\"deny-b\", \"deny-a\"],\n"
     "  \"daemon\": {\"exitOnConfigError\": false, \"pollIntervalSeconds\": 11, \"reloadOnSighup\": true},\n"
     "  \"dryRun\": true,\n"
+    "  \"verboseLog\": true,\n"
+    "  \"logPath\": \"/tmp/netwatch-order.log\",\n"
     "  \"trustedPublishers\": {\n"
     "    \"AlphaPub\": {\"teamId\": \"ATEAM\", \"paths\": [\"/Applications/Alpha.app/Contents/MacOS/Alpha\"], \"signingIdentifier\": \"com.alpha\"},\n"
     "    \"BetaPub\": {\"paths\": [\"/Applications/Beta.app/Contents/MacOS/Beta\"], \"signingIdentifier\": \"com.beta\", \"teamId\": \"BTEAM\"}\n"
@@ -1962,6 +1994,8 @@ static void test_deterministic_json_formatting(void){
   assert_before(out_a, "\"allowAppleSystemComponents\"", "\"trustedPublishers\"");
   assert_before(out_a, "\"trustedPublishers\"", "\"trustedWorkspaces\"");
   assert_before(out_a, "\"trustedWorkspaces\"", "\"denyPatterns\"");
+  assert_before(out_a, "\"logPath\"", "\"verboseLog\"");
+  assert_before(out_a, "\"verboseLog\"", "\"denyPatterns\"");
   assert_before(out_a, "\"Alpha\"", "\"Beta\"");
   assert_before(out_a, "\"AlphaPub\"", "\"BetaPub\"");
   assert_before(out_a, "\"AlphaWs\"", "\"BetaWs\"");
@@ -2664,6 +2698,38 @@ static void test_cli_audit_mode(void){
   free(config); free(out); free(wifi_marker); free(lsof); free(networksetup); free(dir);
 }
 
+static void test_verbose_log_gates_trusted_success(void){
+  char *dir = temp_dir();
+  char *config = join_path_dup(dir, "config.json");
+  char *log = join_path_dup(dir, "netwatch.log");
+  char config_text[1024];
+  snprintf(config_text, sizeof(config_text),
+    "{\"version\":2,\"dryRun\":true,\"logPath\":\"%s\",\"trustedPublishers\":{\"FakeProc\":{\"paths\":[\"/Applications/Fake.app/Contents/MacOS/Fake\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n",
+    log);
+  write_text_mode(config, config_text, 0600);
+
+  FakePlatformState state = { .process_path = "/Applications/Fake.app/Contents/MacOS/Fake" };
+  NetwatchPlatform platform = fake_platform(&state);
+  assert(monitor_run_with_platform(config, &platform) == 0);
+  assert(state.wifi_calls == 0);
+  assert(access(log, F_OK) != 0);
+
+  snprintf(config_text, sizeof(config_text),
+    "{\"version\":2,\"dryRun\":true,\"verboseLog\":true,\"logPath\":\"%s\",\"trustedPublishers\":{\"FakeProc\":{\"paths\":[\"/Applications/Fake.app/Contents/MacOS/Fake\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n",
+    log);
+  write_text_mode(config, config_text, 0600);
+  state = (FakePlatformState){ .process_path = "/Applications/Fake.app/Contents/MacOS/Fake" };
+  platform = fake_platform(&state);
+  assert(monitor_run_with_platform(config, &platform) == 0);
+  char *log_text = must_read(log);
+  assert_contains(log_text, "[TRUSTED_PUBLISHER]");
+  assert_contains(log_text, "PUBLISHER RULE: FakeProc");
+  free(log_text);
+
+  unlink(config); unlink(log); rmdir(dir);
+  free(config); free(log); free(dir);
+}
+
 static void test_monitor_stats(void){
   char *dir = temp_dir();
   char *config = join_path_dup(dir, "config.json");
@@ -2676,7 +2742,7 @@ static void test_monitor_stats(void){
   write_text_mode(workspace_script, "x", 0600);
   char config_text[4096];
   snprintf(config_text, sizeof(config_text),
-    "{\"version\":2,\"dryRun\":false,\"allowAppleSystemComponents\":true,\"logPath\":\"%s\",\"denyPatterns\":[\"BlockedProc\"],\"trustedPublishers\":{\"PublisherProc\":{\"paths\":[\"/Applications/Publisher.app/Contents/MacOS/Publisher\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"trustedWorkspaces\":{\"WorkspaceProc\":{\"roots\":[\"%s\"],\"allowSubdirectories\":true,\"interpreters\":[\"%s\"]}},\"allowProcesses\":{\"AllowedProc\":\"/Applications/Allowed.app/Contents/MacOS/Allowed\"},\"allowRemoteHosts\":[]}\n",
+    "{\"version\":2,\"dryRun\":false,\"verboseLog\":true,\"allowAppleSystemComponents\":true,\"logPath\":\"%s\",\"denyPatterns\":[\"BlockedProc\"],\"trustedPublishers\":{\"PublisherProc\":{\"paths\":[\"/Applications/Publisher.app/Contents/MacOS/Publisher\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"trustedWorkspaces\":{\"WorkspaceProc\":{\"roots\":[\"%s\"],\"allowSubdirectories\":true,\"interpreters\":[\"%s\"]}},\"allowProcesses\":{\"AllowedProc\":\"/Applications/Allowed.app/Contents/MacOS/Allowed\"},\"allowRemoteHosts\":[]}\n",
     log, workspace_root, workspace_interpreter);
   write_text_mode(config, config_text, 0600);
 
@@ -3353,6 +3419,7 @@ int main(void){
   test_audit_mode();
   test_audit_duration();
   test_cli_audit_mode();
+  test_verbose_log_gates_trusted_success();
   test_monitor_stats();
   test_daemon_mode();
   test_daemon_lock_path_canonicalizes_config();

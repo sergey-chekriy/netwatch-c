@@ -37,6 +37,7 @@ private struct StatusBarError: LocalizedError {
 private let minimumPollIntervalSeconds = 30
 private let maximumPollIntervalSeconds = 1800
 private let staleRefreshWindowSeconds: TimeInterval = 20
+private let manualRefreshTimeoutSeconds: TimeInterval = 5
 
 private let popoverWidth: CGFloat = 330
 
@@ -45,11 +46,15 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
   private let popover = NSPopover()
   private let statusURL: URL
   private var timer: Timer?
+  private var logWindowController: LogViewerWindowController?
   fileprivate var lastSnapshot: Snapshot?
   fileprivate var lastError: String?
   fileprivate var lastActionMessage: String?
   private var staleRefreshRequestedForLastScanAt: Int64?
   private var staleRefreshRequestedAt: Date?
+  fileprivate var manualRefreshInProgress = false
+  private var manualRefreshStartedAt: Date?
+  private var manualRefreshPreviousScanAt: Int64?
 
   init(statusPath: String?) {
     if let statusPath, !statusPath.isEmpty {
@@ -83,7 +88,10 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
       let data = try Data(contentsOf: statusURL)
       lastSnapshot = try JSONDecoder().decode(Snapshot.self, from: data)
       lastError = nil
-      if let snapshot = lastSnapshot { requestRefreshIfOnlyStale(snapshot) }
+      if let snapshot = lastSnapshot {
+        finishManualRefreshIfDone(snapshot)
+        requestRefreshIfOnlyStale(snapshot)
+      }
     } catch {
       lastSnapshot = nil
       lastError = error.localizedDescription
@@ -155,6 +163,23 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
       staleRefreshRequestedForLastScanAt == snapshot.lastScanAt,
       let requestedAt = staleRefreshRequestedAt else { return false }
     return Date().timeIntervalSince(requestedAt) < staleRefreshWindowSeconds
+  }
+
+  private func finishManualRefreshIfDone(_ snapshot: Snapshot) {
+    if !manualRefreshInProgress { return }
+    if let previous = manualRefreshPreviousScanAt, snapshot.lastScanAt > previous {
+      manualRefreshInProgress = false
+      manualRefreshStartedAt = nil
+      manualRefreshPreviousScanAt = nil
+      return
+    }
+    if let started = manualRefreshStartedAt,
+       Date().timeIntervalSince(started) >= manualRefreshTimeoutSeconds {
+      manualRefreshInProgress = false
+      manualRefreshStartedAt = nil
+      manualRefreshPreviousScanAt = nil
+      lastActionMessage = "daemon refresh still pending"
+    }
   }
 
   private func circleImage(color: NSColor) -> NSImage {
@@ -304,13 +329,43 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
     }
   }
 
+  @objc fileprivate func refreshDaemonNow() {
+    if manualRefreshInProgress { return }
+    manualRefreshInProgress = true
+    manualRefreshStartedAt = Date()
+    manualRefreshPreviousScanAt = lastSnapshot?.lastScanAt
+    lastActionMessage = nil
+    render()
+    do {
+      try requestDaemonReload()
+      update()
+      for delay in [1.0, 2.0, 4.0, manualRefreshTimeoutSeconds] {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.update() }
+      }
+    } catch {
+      manualRefreshInProgress = false
+      manualRefreshStartedAt = nil
+      manualRefreshPreviousScanAt = nil
+      lastActionMessage = error.localizedDescription
+      render()
+    }
+  }
+
   @objc fileprivate func viewLog() {
     let url = logURL()
-    if FileManager.default.fileExists(atPath: url.path) && NSWorkspace.shared.open(url) {
-      lastActionMessage = "opened log"
-    } else {
-      lastActionMessage = "log not found: \(url.path)"
+    if logWindowController?.logURL.path != url.path {
+      logWindowController = LogViewerWindowController(logURL: url, onClear: { [weak self] url in
+        guard let self else { throw StatusBarError(message: "statusbar unavailable") }
+        try self.truncateFile(url)
+      }, onAction: { [weak self] message in
+        self?.lastActionMessage = message
+        self?.render()
+      })
     }
+    logWindowController?.refresh()
+    logWindowController?.showWindow(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    lastActionMessage = "opened log viewer"
     render()
   }
 
@@ -392,6 +447,17 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
     return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
   }
 
+  private func truncateFile(_ url: URL) throws {
+    let fd = open(url.path, O_WRONLY)
+    if fd < 0 { throw posixError("open", url.path) }
+    var shouldClose = true
+    defer { if shouldClose { close(fd) } }
+    if ftruncate(fd, 0) < 0 { throw posixError("truncate", url.path) }
+    if fsync(fd) < 0 { throw posixError("fsync", url.path) }
+    if close(fd) < 0 { shouldClose = false; throw posixError("close", url.path) }
+    shouldClose = false
+  }
+
   private func writeAtomically(_ data: Data, to url: URL) throws {
     let manager = FileManager.default
     let directory = url.deletingLastPathComponent()
@@ -461,6 +527,7 @@ private final class StatusBarController: NSObject, NSApplicationDelegate {
 private final class PopoverRow: NSView {
   private let titleLabel = NSTextField(labelWithString: "")
   private let shortcutLabel = NSTextField(labelWithString: "")
+  private let clickButton = RowClickButton(frame: .zero)
   private let callback: (() -> Void)?
   private let rowEnabled: Bool
   private var highlighted = false
@@ -485,6 +552,15 @@ private final class PopoverRow: NSView {
       shortcutLabel.frame = NSRect(x: 260, y: 7, width: 48, height: 18)
       addSubview(shortcutLabel)
     }
+    clickButton.frame = bounds
+    clickButton.autoresizingMask = [.width, .height]
+    clickButton.isBordered = false
+    clickButton.isTransparent = true
+    clickButton.title = ""
+    clickButton.target = self
+    clickButton.action = #selector(clicked)
+    clickButton.isEnabled = rowEnabled
+    addSubview(clickButton)
   }
 
   required init?(coder: NSCoder) { nil }
@@ -492,7 +568,7 @@ private final class PopoverRow: NSView {
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
   override func hitTest(_ point: NSPoint) -> NSView? {
-    if rowEnabled && bounds.contains(point) { return self }
+    if rowEnabled && bounds.contains(point) { return clickButton }
     return super.hitTest(point)
   }
 
@@ -507,10 +583,6 @@ private final class PopoverRow: NSView {
   override func mouseEntered(with event: NSEvent) { setHighlighted(true) }
   override func mouseExited(with event: NSEvent) { setHighlighted(false) }
 
-  override func mouseDown(with event: NSEvent) {
-    if rowEnabled { callback?() }
-  }
-
   override func draw(_ dirtyRect: NSRect) {
     if highlighted {
       NSColor.controlAccentColor.setFill()
@@ -524,6 +596,10 @@ private final class PopoverRow: NSView {
     titleLabel.textColor = highlighted ? .selectedMenuItemTextColor
       : (rowEnabled ? .labelColor : .secondaryLabelColor)
     needsDisplay = true
+  }
+
+  @objc private func clicked() {
+    callback?()
   }
 }
 
@@ -540,6 +616,106 @@ private final class SeparatorRow: NSView {
     path.move(to: NSPoint(x: 18, y: 5.5))
     path.line(to: NSPoint(x: popoverWidth - 18, y: 5.5))
     path.stroke()
+  }
+}
+
+private final class RowClickButton: NSButton {
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
+private final class LogViewerWindowController: NSWindowController {
+  let logURL: URL
+  private let textView = NSTextView()
+  private let statusLabel = NSTextField(labelWithString: "")
+  private let onClear: (URL) throws -> Void
+  private let onAction: (String) -> Void
+
+  init(logURL: URL, onClear: @escaping (URL) throws -> Void,
+       onAction: @escaping (String) -> Void) {
+    self.logURL = logURL
+    self.onClear = onClear
+    self.onAction = onAction
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered, defer: false)
+    window.title = "Netwatch Log"
+    window.isReleasedWhenClosed = false
+    super.init(window: window)
+    buildContent()
+    window.center()
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  func refresh() {
+    do {
+      let data = try Data(contentsOf: logURL)
+      textView.string = String(data: data, encoding: .utf8) ?? String(decoding: data, as: UTF8.self)
+      statusLabel.stringValue = logURL.path
+      textView.scrollToEndOfDocument(nil)
+    } catch {
+      textView.string = ""
+      statusLabel.stringValue = "\(logURL.path) - \(error.localizedDescription)"
+    }
+  }
+
+  private func buildContent() {
+    guard let content = window?.contentView else { return }
+    let scrollView = NSScrollView()
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+    scrollView.hasVerticalScroller = true
+    scrollView.hasHorizontalScroller = true
+    scrollView.borderType = .bezelBorder
+    textView.isEditable = false
+    textView.isSelectable = true
+    textView.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    textView.frame = NSRect(x: 0, y: 0, width: 860, height: 460)
+    textView.autoresizingMask = [.width, .height]
+    textView.textContainer?.widthTracksTextView = false
+    scrollView.documentView = textView
+
+    statusLabel.translatesAutoresizingMaskIntoConstraints = false
+    statusLabel.lineBreakMode = .byTruncatingMiddle
+    let refreshButton = NSButton(title: "Refresh", target: self, action: #selector(refreshClicked))
+    let clearButton = NSButton(title: "Clear log file", target: self, action: #selector(clearClicked))
+    let closeButton = NSButton(title: "Close", target: self, action: #selector(closeClicked))
+    let buttons = NSStackView(views: [refreshButton, clearButton, closeButton])
+    buttons.translatesAutoresizingMaskIntoConstraints = false
+    buttons.orientation = .horizontal
+    buttons.spacing = 8
+
+    content.addSubview(statusLabel)
+    content.addSubview(scrollView)
+    content.addSubview(buttons)
+    NSLayoutConstraint.activate([
+      statusLabel.topAnchor.constraint(equalTo: content.topAnchor, constant: 12),
+      statusLabel.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+      statusLabel.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+      scrollView.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 8),
+      scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+      scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+      scrollView.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -12),
+      buttons.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+      buttons.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -12)
+    ])
+  }
+
+  @objc private func refreshClicked() {
+    refresh()
+  }
+
+  @objc private func clearClicked() {
+    do {
+      try onClear(logURL)
+      refresh()
+      onAction("cleared log file")
+    } catch {
+      onAction(error.localizedDescription)
+    }
+  }
+
+  @objc private func closeClicked() {
+    close()
   }
 }
 
@@ -594,7 +770,11 @@ private final class StatusPopoverView: NSView, NSTextFieldDelegate {
       addInfo(controller.statusPathText)
     }
     addSeparator()
-    addRow("Refresh", shortcut: "⌘ R") { controller.update() }
+    if controller.manualRefreshInProgress {
+      addRow("Refresh in progress...", shortcut: "⌘ R", enabled: false) {}
+    } else {
+      addRow("Refresh", shortcut: "⌘ R") { controller.refreshDaemonNow() }
+    }
     addRow("View log", shortcut: "⌘ L") { controller.viewLog() }
     addRow("Configurator") { controller.openConfigurator() }
     addRow("Quit", shortcut: "⌘ Q") { controller.quit() }

@@ -6,6 +6,7 @@
 
 int config_backend_show(const char *config_path, const NetwatchPlatform *platform);
 int config_backend_set_dry_run(const char *config_path, int value, const NetwatchPlatform *platform);
+int config_backend_set_verbose_log(const char *config_path, int value, const NetwatchPlatform *platform);
 int config_backend_set_apple_system_trust(const char *config_path, int value, const NetwatchPlatform *platform);
 int config_backend_set_interface(const char *config_path, const char *value, const NetwatchPlatform *platform);
 int config_backend_set_log_path(const char *config_path, const char *value, const NetwatchPlatform *platform);

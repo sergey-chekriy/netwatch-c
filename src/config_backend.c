@@ -249,6 +249,11 @@ int config_backend_set_apple_system_trust(const char *config_path, int value, co
   return edit_config(config_path, edit_top_bool, &edit, platform);
 }
 
+int config_backend_set_verbose_log(const char *config_path, int value, const NetwatchPlatform *platform){
+  TopBoolEdit edit = { .key = "verboseLog", .value = value ? 1 : 0 };
+  return edit_config(config_path, edit_top_bool, &edit, platform);
+}
+
 typedef struct { const char *key; const char *value; int require_absolute; } OptionalStringEdit;
 
 static int edit_optional_string(cJSON *root, void *ctx, char *changed, size_t changed_len, char *err, size_t err_len){

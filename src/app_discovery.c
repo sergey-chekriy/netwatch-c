@@ -99,6 +99,16 @@ static int cfstring_to_buf(CFTypeRef value, char *out, size_t out_len){
   return value && CFGetTypeID(value) == CFStringGetTypeID() && CFStringGetCString((CFStringRef)value, out, out_len, kCFStringEncodingUTF8);
 }
 
+static void clean_display_name(char *text){
+  char *w = text;
+  for (char *r = text; *r;){
+    unsigned char *p = (unsigned char *)r;
+    if (p[0] == 0xe2 && p[1] && p[2] && p[1] == 0x80 && (p[2] == 0x8e || p[2] == 0x8f)){ r += 3; continue; }
+    *w++ = *r++;
+  }
+  *w = 0;
+}
+
 static int bundle_metadata(const char *bundle_path, char display_name[256], char executable_path[PATH_MAX]){
   fallback_display_name(bundle_path, display_name);
   CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)bundle_path, strlen(bundle_path), true);
@@ -112,6 +122,7 @@ static int bundle_metadata(const char *bundle_path, char display_name[256], char
     cfstring_to_buf(name, display_name, 256);
   }
   if (!display_name[0]) fallback_display_name(bundle_path, display_name);
+  clean_display_name(display_name);
   CFURLRef exe = CFBundleCopyExecutableURL(bundle);
   int ok = exe && CFURLGetFileSystemRepresentation(exe, true, (UInt8 *)executable_path, PATH_MAX);
   if (exe) CFRelease(exe);
@@ -152,10 +163,16 @@ static int app_list_push(AppList *list, const DiscoveredApp *app){
   return 1;
 }
 
-static int discover_bundle(const char *bundle_path, const NetwatchPlatform *platform, AppList *apps){
+static int discover_bundle(const char *bundle_path, const char *display_prefix, char display_out[256], const NetwatchPlatform *platform, AppList *apps){
   DiscoveredApp app = {0};
   snprintf(app.bundle_path, sizeof(app.bundle_path), "%s", bundle_path);
   if (!bundle_metadata(bundle_path, app.display_name, app.executable_path)) return 1;
+  if (display_out) snprintf(display_out, 256, "%s", app.display_name);
+  if (display_prefix && *display_prefix){
+    char child_name[256];
+    snprintf(child_name, sizeof(child_name), "%s", app.display_name);
+    snprintf(app.display_name, sizeof(app.display_name), "%s - %s", display_prefix, child_name);
+  }
   app.signature_valid = signature_valid_for_path(app.executable_path);
   app.apple_signed = signature_satisfies_requirement(app.executable_path, CFSTR("anchor apple"));
   CodeSignatureIdentity identity = {0};
@@ -176,6 +193,27 @@ static char *join_path(const char *dir, const char *name){
   return out;
 }
 
+static int scan_bundle_plugins(const char *bundle_path, const char *display_name, const NetwatchPlatform *platform, AppList *apps){
+  char plugins[PATH_MAX];
+  int n = snprintf(plugins, sizeof(plugins), "%s/Contents/PlugIns", bundle_path);
+  if (n < 0 || (size_t)n >= sizeof(plugins)) return 1;
+  DIR *d = opendir(plugins);
+  if (!d) return 1;
+  struct dirent *ent;
+  while ((ent = readdir(d))){
+    if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..") || !has_suffix(ent->d_name, ".appex")) continue;
+    char *path = join_path(plugins, ent->d_name);
+    if (!path){ closedir(d); return 0; }
+    struct stat st;
+    if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode) && !discover_bundle(path, display_name, NULL, platform, apps)){
+      free(path); closedir(d); return 0;
+    }
+    free(path);
+  }
+  closedir(d);
+  return 1;
+}
+
 static int scan_dir(const char *dir, int depth, const NetwatchPlatform *platform, AppList *apps){
   DIR *d = opendir(dir);
   if (!d) return errno == ENOENT ? 1 : 0;
@@ -187,7 +225,11 @@ static int scan_dir(const char *dir, int depth, const NetwatchPlatform *platform
     struct stat st;
     if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode)){
       if (has_suffix(ent->d_name, ".app")){
-        if (!discover_bundle(path, platform, apps)){ free(path); closedir(d); return 0; }
+        char display_name[256] = {0};
+        if (!discover_bundle(path, NULL, display_name, platform, apps)
+          || !scan_bundle_plugins(path, display_name, platform, apps)){
+          free(path); closedir(d); return 0;
+        }
       } else if (depth < 5 && !scan_dir(path, depth + 1, platform, apps)){
         free(path); closedir(d); return 0;
       }

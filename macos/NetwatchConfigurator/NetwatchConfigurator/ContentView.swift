@@ -39,6 +39,9 @@ struct ContentView: View {
       }
     }
     .task { await viewModel.refreshAll() }
+    .onChange(of: selection) { section in
+      if section == .dashboard { Task { await viewModel.refreshStatus() } }
+    }
   }
 }
 
@@ -143,9 +146,9 @@ private struct ApplicationsView: View {
           info("Bundle", app.bundlePath)
         }
         HStack {
-          if viewModel.isTrustedPublisher(app.displayName) {
+          if let publisherName = viewModel.trustedPublisherName(for: app) {
             Button("Remove trusted publisher") {
-              Task { await viewModel.removeTrustedPublisher(name: app.displayName) }
+              Task { await viewModel.removeTrustedPublisher(name: publisherName) }
             }
           } else {
             Button("Add as trusted publisher") {
@@ -327,6 +330,7 @@ private struct SettingsView: View {
     Divider()
     TextField("Wi-Fi interface", text: $viewModel.desiredInterface)
     TextField("Log path, empty for default", text: $viewModel.desiredLogPath)
+    Toggle("verboseLog", isOn: $viewModel.desiredVerboseLog)
     Button("Save interface/logging") { Task { await viewModel.saveInterfaceAndLogPath() } }
     Divider()
     Toggle("Reload on SIGHUP", isOn: $viewModel.desiredReloadOnSighup)

@@ -85,7 +85,7 @@ Status colors:
 `daemonRunning` is displayed but does not control the color. `Result ok` means `configValid=true`, `lastScanResult=ok`, `unknownCount=0`, `wouldDisableWifi=false`, and `wifiDisabled=false`. The menu bar app allows a 10-second freshness grace while a scheduled scan is finishing. `dryRun=true` with a clean fresh scan is orange because protection is not enforcing; red is reserved for stale status or actual scan problems.
 The menu bar app and configurator share the same Swift status presentation code for this mapping.
 
-The dashboard can refresh status, check config, open the config file, open the watch directory, and reload the daemon.
+The dashboard refreshes status each time it is opened. It can also manually refresh status, check config, open the config file, open the watch directory, and reload the daemon.
 
 ## Settings
 
@@ -96,12 +96,13 @@ Settings can edit the known scalar and list fields without hand-editing JSON:
 - `allowAppleSystemComponents`;
 - `interface`;
 - `logPath`;
+- `verboseLog`;
 - `daemon.reloadOnSighup`;
 - `daemon.exitOnConfigError`;
 - `denyPatterns`;
 - `allowRemoteHosts`.
 
-List fields are edited as one value per line. Empty lines are ignored. An empty `logPath` removes the field and lets netwatch use its default log path.
+List fields are edited as one value per line. Empty lines are ignored. An empty `logPath` removes the field and lets netwatch use its default log path. `verboseLog` defaults to `false`; enable it only when routine trusted allow decisions should be written to the log.
 
 ## Applications
 
@@ -111,7 +112,7 @@ Applications uses:
 netwatch --discover-apps --json
 ```
 
-It displays installed `.app` bundles with display name, bundle path, executable path, signature status, Team ID, signing identifier, Apple-signed flag, and whether the app is suitable for `trustedPublishers`.
+It displays installed `.app` bundles and nested app extensions from `Contents/PlugIns/*.appex` with display name, bundle path, executable path, signature status, Team ID, signing identifier, Apple-signed flag, and whether the item is suitable for `trustedPublishers`.
 
 Adding or editing a trusted publisher is always an explicit user action and calls backend commands such as:
 
@@ -133,6 +134,8 @@ netwatch --config-set-trusted-publisher "<old-name>" \
 The app never auto-trusts all discovered apps and never invents Team IDs or signing identifiers. Configured trusted publisher rules can be renamed, edited, or removed from the Applications screen.
 
 The Applications screen also shows matching path-only `allowProcesses` rules and can remove them. It can add either the exact executable path or an app-bundle wildcard such as `/Applications/Opera.app/Contents/*`. Use the wildcard for apps whose helper processes also need to be covered. Path-only allows are legacy/manual rules and are weaker than trusted publisher verification.
+
+For WhatsApp notification traffic, add the discovered `WhatsApp - ServiceExtension` item as a trusted publisher. Its executable is inside `/Applications/WhatsApp.app/Contents/PlugIns/ServiceExtension.appex`.
 
 ## Path-only Allows
 

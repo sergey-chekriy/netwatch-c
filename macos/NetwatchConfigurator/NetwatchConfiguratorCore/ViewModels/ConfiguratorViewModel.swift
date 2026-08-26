@@ -22,6 +22,7 @@ public final class ConfiguratorViewModel: ObservableObject {
   @Published public var desiredAppleSystemTrust = false
   @Published public var desiredInterface = "Wi-Fi"
   @Published public var desiredLogPath = ""
+  @Published public var desiredVerboseLog = false
   @Published public var desiredReloadOnSighup = true
   @Published public var desiredExitOnConfigError = false
   @Published public var denyPatternsText = ""
@@ -51,8 +52,9 @@ public final class ConfiguratorViewModel: ObservableObject {
     }
   }
 
-  public func isTrustedPublisher(_ name: String) -> Bool {
-    config?.trustedPublishers?[name] != nil
+  public func trustedPublisherName(for app: DiscoveredApp) -> String? {
+    if config?.trustedPublishers?[app.displayName] != nil { return app.displayName }
+    return config?.publisherItems.first { $0.rule.paths.contains(app.executablePath) }?.name
   }
 
   public func pathOnlyAllows(for app: DiscoveredApp) -> [AllowProcessItem] {
@@ -90,6 +92,7 @@ public final class ConfiguratorViewModel: ObservableObject {
       desiredAppleSystemTrust = config?.allowAppleSystemComponents ?? false
       desiredInterface = config?.interface ?? "Wi-Fi"
       desiredLogPath = config?.logPath ?? ""
+      desiredVerboseLog = config?.verboseLog ?? false
       desiredReloadOnSighup = config?.daemon?.reloadOnSighup ?? true
       desiredExitOnConfigError = config?.daemon?.exitOnConfigError ?? false
       denyPatternsText = (config?.denyPatterns ?? []).joined(separator: "\n")
@@ -125,9 +128,10 @@ public final class ConfiguratorViewModel: ObservableObject {
   }
 
   public func saveInterfaceAndLogPath() async {
-    await perform("Interface and log path saved. Reload daemon when ready.") {
+    await perform("Interface and logging saved. Reload daemon when ready.") {
       lastCommandOutput = try await service.setInterface(desiredInterface, configPath: configPath)
       lastCommandOutput += try await service.setLogPath(desiredLogPath, configPath: configPath)
+      lastCommandOutput += try await service.setVerboseLog(desiredVerboseLog, configPath: configPath)
       await refreshConfig()
     }
   }

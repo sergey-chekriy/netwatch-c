@@ -19,7 +19,7 @@
 static void print_usage(const char *argv0){
   fprintf(stderr, "Usage: %s [config.json]\n       %s --once --config <config.json>\n       %s --daemon --config <config.json>\n       %s --dry-run [config.json]\n       %s --stats [config.json]\n       %s --audit [seconds]\n       %s --status\n       %s --status-json\n       %s --convert-config <config.json>\n       %s --check-config <config.json>\n       %s --why <pid-or-executable-path>\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
   fprintf(stderr, "       %s --discover-apps --json\n       %s --config-show --config <config.json>\n       %s --config-set-dry-run true|false --config <config.json>\n       %s --config-set-poll-interval <seconds> --config <config.json>\n       %s --config-add-trusted-publisher <name> --path <executable-path> --team-id <team-id> --signing-identifier <identifier> --config <config.json>\n       %s --config-set-trusted-publisher <old-name> --name <new-name> --path <path> [--path <path> ...] --team-id <team-id> --signing-identifier <identifier> --config <config.json>\n       %s --config-remove-trusted-publisher <name> --config <config.json>\n       %s --config-add-trusted-workspace <name> --root <folder-path> --interpreter <executable-path> --config <config.json>\n       %s --config-set-trusted-workspace <old-name> --name <new-name> --root <path> [--root <path> ...] --interpreter <path> [--interpreter <path> ...] --allow-subdirectories true|false --allow-by-cwd-only true|false --config <config.json>\n       %s --config-remove-trusted-workspace <name> --config <config.json>\n       %s --reload-daemon\n", argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0);
-  fprintf(stderr, "       %s --config-set-apple-system-trust true|false --config <config.json>\n       %s --config-set-interface <name-or-empty> --config <config.json>\n       %s --config-set-log-path <path-or-empty> --config <config.json>\n", argv0, argv0, argv0);
+  fprintf(stderr, "       %s --config-set-apple-system-trust true|false --config <config.json>\n       %s --config-set-interface <name-or-empty> --config <config.json>\n       %s --config-set-log-path <path-or-empty> --config <config.json>\n       %s --config-set-verbose-log true|false --config <config.json>\n", argv0, argv0, argv0, argv0);
   fprintf(stderr, "       %s --config-set-daemon-reload-on-sighup true|false --config <config.json>\n       %s --config-set-daemon-exit-on-config-error true|false --config <config.json>\n       %s --config-set-deny-patterns [--value <pattern> ...] --config <config.json>\n       %s --config-set-allow-remote-hosts [--value <prefix> ...] --config <config.json>\n", argv0, argv0, argv0, argv0);
   fprintf(stderr, "       %s --config-add-allow-process <name> --path <path-or-prefix*> --config <config.json>\n       %s --config-set-allow-process <old-name> --name <new-name> --path <path-or-prefix*> [--path <path-or-prefix*> ...] --config <config.json>\n       %s --config-remove-allow-process <name> --config <config.json>\n", argv0, argv0, argv0);
 }
@@ -184,6 +184,11 @@ int main(int argc, char **argv){
   if (argc > 1 && !strcmp(argv[1], "--config-set-log-path")){
     if (argc != 5 || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
     return config_backend_set_log_path(argv[4], argv[2], netwatch_platform_default());
+  }
+  if (argc > 1 && !strcmp(argv[1], "--config-set-verbose-log")){
+    int value = 0;
+    if (argc != 5 || !parse_bool_arg(argv[2], &value) || strcmp(argv[3], "--config")){ print_usage(argv[0]); return 1; }
+    return config_backend_set_verbose_log(argv[4], value, netwatch_platform_default());
   }
   if (argc > 1 && !strcmp(argv[1], "--config-set-poll-interval")){
     int seconds = 0;

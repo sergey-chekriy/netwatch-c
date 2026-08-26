@@ -20,6 +20,7 @@ typedef struct {
 
 typedef struct {
   bool dry_run;
+  bool verbose_log;
   bool allow_apple_system_components;
   DaemonConfig daemon;
   char *interface;

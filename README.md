@@ -116,6 +116,12 @@ make install
 
 `make install` overwrites `~/.watch/netwatch`, but it does not overwrite an existing `~/.watch/netwatch.config.json`.
 
+If the daemon is already running, restart it after replacing the binary. `--reload-daemon` reloads config only; it does not replace the running executable:
+
+```bash
+launchctl kickstart -k "gui/$(id -u)/com.serg.netwatch"
+```
+
 Edit the config before enabling automatic Wi-Fi shutdown:
 
 ```bash
@@ -389,7 +395,7 @@ launchctl kill SIGHUP "gui/$(id -u)/com.serg.netwatch"
 
 The popover shows an `Action` line after a save or reload error.
 
-The `Interval: Ns` row is normally static. Click it to edit the seconds value in place, then press Enter to save `daemon.pollIntervalSeconds` or Esc to cancel. Accepted values are 30-1800 seconds. `View log` opens the configured `logPath`, or `$HOME/.watch/netwatch.log` when `logPath` is omitted. `Configurator` opens the first `NetwatchConfigurator.app` found in `~/.watch`, `~/Applications`, `/Applications`, or this repository's `build/` directory.
+The `Interval: Ns` row is normally static. Click it to edit the seconds value in place, then press Enter to save `daemon.pollIntervalSeconds` or Esc to cancel. Accepted values are 30-1800 seconds. `Refresh` requests a daemon refresh with SIGHUP and then rereads the status snapshot; while waiting for the daemon response it appears as disabled `Refresh in progress...`. `View log` opens a built-in read-only log viewer for the configured `logPath`, or `$HOME/.watch/netwatch.log` when `logPath` is omitted. The log viewer's `Clear log file` button truncates that log file to zero bytes. `Configurator` opens the first `NetwatchConfigurator.app` found in `~/.watch`, `~/Applications`, `/Applications`, or this repository's `build/` directory.
 
 ## Audit mode
 
@@ -440,7 +446,7 @@ Discover installed `.app` bundles:
 ./netwatch --discover-apps --json
 ```
 
-The JSON contains one item per discovered app with `displayName`, `bundlePath`, `executablePath`, `teamId`, `signingIdentifier`, `signatureValid`, `appleSigned`, and `suitableTrustedPublisher`. Discovery scans `/Applications`, `/System/Applications`, and `~/Applications`. It never adds rules automatically.
+The JSON contains one item per discovered app with `displayName`, `bundlePath`, `executablePath`, `teamId`, `signingIdentifier`, `signatureValid`, `appleSigned`, and `suitableTrustedPublisher`. Discovery scans `/Applications`, `/System/Applications`, `~/Applications`, and app extensions under each discovered app's `Contents/PlugIns/*.appex`. It never adds rules automatically.
 
 Show a config in deterministic format:
 
@@ -457,6 +463,7 @@ Edit selected config fields:
 ./netwatch --config-set-apple-system-trust true --config /path/to/netwatch.config.json
 ./netwatch --config-set-interface "Wi-Fi" --config /path/to/netwatch.config.json
 ./netwatch --config-set-log-path "/Users/serg/.watch/netwatch.log" --config /path/to/netwatch.config.json
+./netwatch --config-set-verbose-log false --config /path/to/netwatch.config.json
 ./netwatch --config-set-daemon-reload-on-sighup true --config /path/to/netwatch.config.json
 ./netwatch --config-set-daemon-exit-on-config-error false --config /path/to/netwatch.config.json
 ./netwatch --config-set-deny-patterns --value "bad-host" --value ":4444" --config /path/to/netwatch.config.json
@@ -530,7 +537,19 @@ Add or remove legacy path-only allow rules:
   --config /path/to/netwatch.config.json
 ```
 
-Path-only rules preserve the existing `allowProcesses` semantics and are weaker than `trustedPublishers`: they do not verify Team ID or signing identifier. Use them for explicit legacy/manual rules, optional local tools such as `/usr/bin/ssh` or `/usr/bin/scp`, Apple executables outside automatic Apple roots, apps that cannot currently be verified as trusted publishers, or app helpers that are not yet modeled as trusted publisher paths. The configurator can add path-only rules from manual paths or from discovered `.app` bundles, and can edit existing rule names and paths without hand-editing JSON.
+Path-only rules preserve the existing `allowProcesses` semantics and are weaker than `trustedPublishers`: they do not verify Team ID or signing identifier. Use them for explicit legacy/manual rules, optional local tools such as `/usr/bin/ssh` or `/usr/bin/scp`, Apple executables outside automatic Apple roots, apps that cannot currently be verified as trusted publishers, or app helpers that are not yet modeled as trusted publisher paths. The configurator can add path-only rules from manual paths, discovered `.app` bundles, and discovered extension executables, and can edit existing rule names and paths without hand-editing JSON.
+
+WhatsApp may start signed extensions such as `ServiceExtension.appex` separately from the main app. Prefer adding the discovered `WhatsApp - ServiceExtension` item as a trusted publisher. Manual equivalent:
+
+```bash
+./netwatch --config-add-trusted-publisher "WhatsApp ServiceExtension" \
+  --path "/Applications/WhatsApp.app/Contents/PlugIns/ServiceExtension.appex/Contents/MacOS/ServiceExtension" \
+  --team-id "57T9237FN3" \
+  --signing-identifier "net.whatsapp.WhatsApp.ServiceExtension" \
+  --config /path/to/netwatch.config.json
+```
+
+If you use a path-only fallback for that extension, the process key must match the `lsof` name, usually `ServiceEx`, not `WhatsApp`.
 
 Config editing commands validate the existing config, modify only the requested field, validate the updated config, create a backup, write a same-directory temporary file, flush it, atomically replace the original with `rename()`, and preserve unrelated fields. Output uses the same deterministic JSON formatting as config conversion. Repeated config backend edits use the first available backup name from `config.json.bak` through `config.json.bak.999`.
 
@@ -737,6 +756,7 @@ Example:
   "trustedWorkspaces": {},
   "interface": "Wi-Fi",
   "logPath": "/Users/serg/.watch/netwatch.log",
+  "verboseLog": false,
 
   "denyPatterns": [
     "144.172.104.196",
@@ -912,7 +932,15 @@ Path to the log file:
 "logPath": "/Users/serg/.watch/netwatch.log"
 ```
 
-The tool logs suspicious connections, errors, successful trusted publisher verifications, and successful trusted workspace verifications. It does not write `OK` runs to the log.
+The tool logs suspicious connections, dry-run/enforcement messages, and errors. It does not write `OK` runs to the log.
+
+### `verboseLog`
+
+When `verboseLog` is `false` or omitted, the log keeps only problems: suspicious connections, dry-run/enforcement messages, and errors. When `true`, it also writes routine successful trusted publisher and trusted workspace decisions:
+
+```json
+"verboseLog": false
+```
 
 ### `denyPatterns`
 
@@ -1190,7 +1218,7 @@ tail -50 ~/.watch/netwatch.launchd.out.log
 tail -50 ~/.watch/netwatch.launchd.err.log
 ```
 
-The main log is written for suspicious connections, errors, and successful trusted publisher verifications. Successful `OK` checks are printed during manual runs but not appended to the main log.
+The main log is written for suspicious connections, dry-run/enforcement messages, and errors. With `verboseLog: true`, it also records successful trusted publisher and trusted workspace decisions. Successful `OK` checks are printed during manual runs but not appended to the main log.
 
 ## Tuning the allowlist
 
@@ -1254,7 +1282,7 @@ If logPath is omitted in netwatch.config.json, the tool uses:
 $HOME/.watch/netwatch.log
 ```
 
-The tool logs suspicious connections, errors, and successful trusted publisher verifications. It does not write OK runs to the log.
+The tool logs suspicious connections, dry-run/enforcement messages, and errors. With `verboseLog: true`, it also records successful trusted publisher and trusted workspace decisions. It does not write OK runs to the log.
 
 ## JSON parser note
 

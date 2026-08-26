@@ -358,6 +358,7 @@ int config_parse_text(Config *cfg, const char *text, const char *source, char *e
 
   int ok = parse_optional_string(cJSON_GetObjectItemCaseSensitive(root, "interface"), &cfg->interface, "interface", err, err_len)
     && parse_optional_string(cJSON_GetObjectItemCaseSensitive(root, "logPath"), &cfg->log_path, "logPath", err, err_len)
+    && parse_optional_bool(cJSON_GetObjectItemCaseSensitive(root, "verboseLog"), &cfg->verbose_log, "verboseLog", err, err_len)
     && parse_optional_bool(cJSON_GetObjectItemCaseSensitive(root, "allowAppleSystemComponents"), &cfg->allow_apple_system_components, "allowAppleSystemComponents", err, err_len)
     && parse_string_array(cJSON_GetObjectItemCaseSensitive(root, "denyPatterns"), &cfg->deny_patterns, "denyPatterns", err, err_len)
     && parse_string_array(cJSON_GetObjectItemCaseSensitive(root, "allowRemoteHosts"), &cfg->allow_remote_hosts, "allowRemoteHosts", err, err_len)

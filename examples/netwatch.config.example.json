@@ -10,6 +10,7 @@
   "trustedPublishers": {},
   "trustedWorkspaces": {},
   "interface": "Wi-Fi",
+  "verboseLog": false,
   "denyPatterns": [
     "144.172.104.196",
     "165.140.86.183",

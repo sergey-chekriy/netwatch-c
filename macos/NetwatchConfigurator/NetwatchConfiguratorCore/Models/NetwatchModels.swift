@@ -48,6 +48,7 @@ public struct ConfigSummary: Decodable, Equatable {
   public let allowAppleSystemComponents: Bool?
   public let interface: String?
   public let logPath: String?
+  public let verboseLog: Bool?
   public let denyPatterns: [String]?
   public let allowRemoteHosts: [String]?
   public let trustedPublishers: [String: TrustedPublisherRule]?

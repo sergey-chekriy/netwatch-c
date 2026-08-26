@@ -168,7 +168,7 @@ int monitor_scan_config_with_outcome(const Config *cfg, MonitorStats *stats, Mon
       fill_unknown_summary(&outcome->last_unknown, connections.items[i], proc_copy, pid, path_for_summary, policy, cfg, platform);
     }
     free(path_for_summary);
-    if (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER || policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE){
+    if (cfg->verbose_log && (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER || policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE)){
       log_trusted_publisher_success(cfg, connections.items[i], &cache, policy, platform);
     }
     if (connection_decision_allowed(policy.decision)) continue;

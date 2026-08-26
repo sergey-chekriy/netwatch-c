@@ -103,6 +103,7 @@ static int top_level_key_rank(const char *key){
     "trustedWorkspaces",
     "interface",
     "logPath",
+    "verboseLog",
     "denyPatterns",
     "allowProcesses",
     "allowRemoteHosts"

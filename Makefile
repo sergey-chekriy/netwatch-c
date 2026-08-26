@@ -13,6 +13,7 @@ LDFLAGS ?=
 LDLIBS ?= -framework Security -framework CoreFoundation
 SRC := $(wildcard src/*.c) third_party/cjson/cJSON.c
 OBJ := $(SRC:.c=.o)
+HDR := $(wildcard include/*.h) third_party/cjson/cJSON.h
 TEST_APP := tests/netwatch_tests
 TEST_SRC := tests/netwatch_tests.c src/allow.c src/apple_trust.c src/app_discovery.c src/audit.c src/config.c src/config_backend.c src/config_check.c src/config_convert.c src/daemon.c src/logging.c src/monitor.c src/platform.c src/process.c src/status.c src/status_snapshot.c src/strlist.c src/trusted_publisher.c src/trusted_workspace.c src/util.c src/wifi.c src/why.c third_party/cjson/cJSON.c
 PREFIX ?= $(HOME)/.watch
@@ -25,7 +26,7 @@ all: $(APP)
 $(APP): $(OBJ)
 	$(CC) $(OBJ) $(LDFLAGS) $(LDLIBS) -o $@
 
-%.o: %.c
+%.o: %.c $(HDR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(TEST_APP): $(TEST_SRC)
