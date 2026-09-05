@@ -35,8 +35,10 @@ struct NetwatchConfiguratorSelfTest {
     try dryRunMapsToOrangeAttention()
     try attentionAndErrorMapToRed()
     try await discoveredAppsJSONDecoding()
+    try await trustedAppBundleCommand()
     try await configSummaryJSONDecoding()
     try trustedPublisherLookupUsesExecutablePath()
+    try configuratorDisplaysSignedHelperCandidate()
     try await runnerFailureIsStructured()
     try await timeoutHandling()
     try await fakeRunnerSuccessRecordsArguments()
@@ -86,7 +88,7 @@ struct NetwatchConfiguratorSelfTest {
   private static func discoveredAppsJSONDecoding() async throws {
     let service = NetwatchService(binaryPath: "/tmp/netwatch", runner: FakeRunner([
       CommandResult(stdout: """
-      {"apps":[{"displayName":"Chrome","bundlePath":"/Applications/Chrome.app","executablePath":"/Applications/Chrome.app/Contents/MacOS/Chrome","signingIdentifier":"com.google.Chrome","teamId":"TEAM","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true}]}
+      {"apps":[{"displayName":"Chrome","bundlePath":"/Applications/Chrome.app","parentBundlePath":null,"executablePath":"/Applications/Chrome.app/Contents/MacOS/Chrome","signingIdentifier":"com.google.Chrome","teamId":"TEAM","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true,"signedHelperCandidate":false}]}
       """, stderr: "", exitCode: 0)
     ]))
     let apps = try await service.discoverApps()
@@ -94,10 +96,36 @@ struct NetwatchConfiguratorSelfTest {
     try expect(apps[0].suitableTrustedPublisher, "discover suitability")
   }
 
+  private static func trustedAppBundleCommand() async throws {
+    let config = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString).path
+    FileManager.default.createFile(atPath: config, contents: Data("{}".utf8))
+    let apps = try JSONDecoder().decode(DiscoveredAppsResponse.self, from: Data("""
+    {"apps":[
+      {"displayName":"ChatGPT","bundlePath":"/Applications/ChatGPT.app","parentBundlePath":null,"executablePath":"/Applications/ChatGPT.app/Contents/MacOS/ChatGPT","signingIdentifier":"com.openai.codex","teamId":"TEAM","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true,"signedHelperCandidate":false},
+      {"displayName":"ChatGPT - launch-services-helper","bundlePath":"/Applications/ChatGPT.app","parentBundlePath":"/Applications/ChatGPT.app","executablePath":"/Applications/ChatGPT.app/Contents/Resources/native/launch-services-helper","signingIdentifier":"launch-services-helper","teamId":"TEAM","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true,"signedHelperCandidate":true},
+      {"displayName":"ChatGPT - codex","bundlePath":"/Applications/ChatGPT.app","parentBundlePath":"/Applications/ChatGPT.app","executablePath":"/Applications/ChatGPT.app/Contents/Resources/codex","signingIdentifier":"codex","teamId":"TEAM","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true,"signedHelperCandidate":true}
+    ]}
+    """.utf8)).apps
+    let runner = FakeRunner([CommandResult(stdout: "added\n", stderr: "", exitCode: 0)])
+    let service = NetwatchService(binaryPath: "/tmp/netwatch", runner: runner)
+    _ = try await service.addTrustedAppBundle(apps[0], helpers: [apps[1], apps[2]], configPath: config)
+    try expect(runner.calls[0].1 == [
+      "--config-add-trusted-app-bundle", "ChatGPT",
+      "--bundle-root", "/Applications/ChatGPT.app",
+      "--team-id", "TEAM",
+      "--signing-identifier", "com.openai.codex",
+      "--signing-identifier", "launch-services-helper",
+      "--signing-identifier", "codex",
+      "--signing-identifier-prefix", "com.openai.codex.",
+      "--allow-subdirectories", "true",
+      "--config", config
+    ], "trusted app bundle args")
+  }
+
   private static func configSummaryJSONDecoding() async throws {
     let service = NetwatchService(binaryPath: "/tmp/netwatch", runner: FakeRunner([
       CommandResult(stdout: """
-      {"version":2,"dryRun":true,"daemon":{"pollIntervalSeconds":300,"reloadOnSighup":true,"exitOnConfigError":false},"allowAppleSystemComponents":true,"interface":"Wi-Fi","logPath":"/tmp/netwatch.log","verboseLog":true,"denyPatterns":["bad"],"allowRemoteHosts":["17."],"allowProcesses":{"ssh":"/usr/bin/ssh","tool":["/a","/b"]},"trustedPublishers":{"Chrome":{"paths":["/a"],"teamId":"TEAM","signingIdentifier":"id"}},"trustedWorkspaces":{"scripts":{"roots":["/r"],"allowSubdirectories":true,"interpreters":["/bin/zsh"],"allowByCwdOnly":false}}}
+      {"version":2,"dryRun":true,"daemon":{"pollIntervalSeconds":300,"reloadOnSighup":true,"exitOnConfigError":false},"allowAppleSystemComponents":true,"interface":"Wi-Fi","logPath":"/tmp/netwatch.log","verboseLog":true,"denyPatterns":["bad"],"allowRemoteHosts":["17."],"allowProcesses":{"ssh":"/usr/bin/ssh","tool":["/a","/b"]},"trustedPublishers":{"Chrome":{"paths":["/a"],"teamId":"TEAM","signingIdentifier":"id"}},"trustedAppBundles":{"Chrome":{"bundleRoot":"/Applications/Chrome.app","teamId":"TEAM","allowedSigningIdentifiers":["id"],"allowedSigningIdentifierPrefixes":["id."],"allowSubdirectories":true}},"trustedWorkspaces":{"scripts":{"roots":["/r"],"allowSubdirectories":true,"interpreters":["/bin/zsh"],"allowByCwdOnly":false}}}
       """, stderr: "", exitCode: 0)
     ]))
     let summary = try await service.configSummary(configPath: "/tmp/config.json")
@@ -110,6 +138,7 @@ struct NetwatchConfiguratorSelfTest {
     try expect(summary.daemon?.reloadOnSighup == true, "daemon reload decode")
     try expect(summary.daemon?.exitOnConfigError == false, "daemon exit decode")
     try expect(summary.publisherItems.map(\.name) == ["Chrome"], "publisher summary decode")
+    try expect(summary.appBundleItems.map(\.name) == ["Chrome"], "app bundle summary decode")
     try expect(summary.workspaceItems.map(\.name) == ["scripts"], "workspace summary decode")
     try expect(summary.allowProcessItems.map(\.name) == ["ssh", "tool"], "allow process summary decode")
     try expect(summary.allowProcesses?["tool"]?.paths == ["/a", "/b"], "allow process array decode")
@@ -121,9 +150,23 @@ struct NetwatchConfiguratorSelfTest {
     {"trustedPublishers":{"\u200eWhatsApp":{"paths":["/Applications/WhatsApp.app/Contents/MacOS/WhatsApp"],"teamId":"57T9237FN3","signingIdentifier":"net.whatsapp.WhatsApp"}}}
     """#.utf8))
     let app = try JSONDecoder().decode(DiscoveredApp.self, from: Data("""
-    {"displayName":"WhatsApp","bundlePath":"/Applications/WhatsApp.app","executablePath":"/Applications/WhatsApp.app/Contents/MacOS/WhatsApp","signingIdentifier":"net.whatsapp.WhatsApp","teamId":"57T9237FN3","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true}
+    {"displayName":"WhatsApp","bundlePath":"/Applications/WhatsApp.app","parentBundlePath":null,"executablePath":"/Applications/WhatsApp.app/Contents/MacOS/WhatsApp","signingIdentifier":"net.whatsapp.WhatsApp","teamId":"57T9237FN3","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true,"signedHelperCandidate":false}
     """.utf8))
     try expect(viewModel.trustedPublisherName(for: app) == "\u{200E}WhatsApp", "trusted publisher path lookup")
+  }
+
+  @MainActor private static func configuratorDisplaysSignedHelperCandidate() throws {
+    let apps = try JSONDecoder().decode(DiscoveredAppsResponse.self, from: Data("""
+    {"apps":[
+      {"displayName":"Example","bundlePath":"/Applications/Example.app","parentBundlePath":null,"executablePath":"/Applications/Example.app/Contents/MacOS/Example","signingIdentifier":"com.example.app","teamId":"TEAM","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true,"signedHelperCandidate":false},
+      {"displayName":"Example - Helper","bundlePath":"/Applications/Example.app/Contents/Frameworks/Helper.app","parentBundlePath":"/Applications/Example.app","executablePath":"/Applications/Example.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper","signingIdentifier":"com.example.app.helper","teamId":"TEAM","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true,"signedHelperCandidate":true}
+    ]}
+    """.utf8)).apps
+    let viewModel = ConfiguratorViewModel(service: NetwatchService(binaryPath: "/tmp/netwatch", runner: FakeRunner([])))
+    viewModel.apps = apps
+    try expect(viewModel.filteredTopLevelApps == [apps[0]], "helper grouped under parent app")
+    try expect(viewModel.helpers(for: apps[0]) == [apps[1]], "helper displayed in parent group")
+    try expect(viewModel.helpers(for: apps[0])[0].signedHelperCandidate, "signed helper candidate displayed")
   }
 
   private static func runnerFailureIsStructured() async throws {

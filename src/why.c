@@ -63,6 +63,7 @@ static const char *why_decision_name(ConnectionDecision decision){
     case CONNECTION_DENIED: return "DENIED";
     case CONNECTION_ALLOWED_LOCALHOST:
     case CONNECTION_ALLOWED_TRUSTED_PUBLISHER:
+    case CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE:
     case CONNECTION_ALLOWED_TRUSTED_WORKSPACE:
     case CONNECTION_ALLOWED_CONFIG: return "ALLOWED";
     case CONNECTION_ALLOWED_APPLE_SYSTEM: return "APPLE_SYSTEM";
@@ -73,6 +74,7 @@ static const char *why_decision_name(ConnectionDecision decision){
 
 static const char *trust_source_name(ConnectionPolicy policy){
   if (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER) return "TRUSTED_PUBLISHER";
+  if (policy.decision == CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE) return "TRUSTED_APP_BUNDLE";
   if (policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE) return "TRUSTED_WORKSPACE";
   if (policy.decision == CONNECTION_ALLOWED_APPLE_SYSTEM) return "APPLE_SYSTEM";
   if (policy.decision == CONNECTION_ALLOWED_CONFIG) return "CONFIG";
@@ -108,6 +110,24 @@ static void print_policy(ConnectionPolicy policy){
     } else {
       printf("  %s\n", trusted_publisher_result_name(policy.trusted_publisher));
     }
+  } else if (policy.trusted_app_bundle_checked){
+    printf("Bundle rule: %s\n", policy.matched_app_bundle ? policy.matched_app_bundle : "(unknown)");
+    if (policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_OK){
+      printf("Code signature valid\n");
+      printf("Team ID matched\n");
+      printf("Signing identifier matched\n");
+      printf("Executable is inside bundle root\n");
+    } else {
+      printf("  %s\n", trusted_app_bundle_result_name(policy.trusted_app_bundle));
+      if (policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_TEAM_ID_MISMATCH){
+        printf("\nExpected Team ID:\n  %s\n", policy.expected_team_id ? policy.expected_team_id : "(unknown)");
+        printf("\nActual Team ID:\n  %s\n", policy.actual_team_id[0] ? policy.actual_team_id : "(unavailable)");
+      } else if (policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_SIGNING_IDENTIFIER_MISMATCH){
+        printf("\nActual signing identifier:\n  %s\n",
+          policy.actual_signing_identifier[0] ? policy.actual_signing_identifier : "(unavailable)");
+      }
+    }
+    if (policy.matched_bundle_root) printf("\nBundle root:\n  %s\n", policy.matched_bundle_root);
   } else if (policy.trusted_workspace_checked){
     printf("  interpreter matched");
     if (policy.matched_workspace) printf(" trustedWorkspaces.%s", policy.matched_workspace);
@@ -192,7 +212,8 @@ static int why_explain_base(const Config *cfg, const char *target, const Netwatc
     print_policy(policy);
     return 0;
   }
-  if (policy.decision != CONNECTION_ALLOWED_CONFIG && !policy.trusted_publisher_checked && !policy.trusted_workspace_checked){
+  if (policy.decision != CONNECTION_ALLOWED_CONFIG && !policy.trusted_publisher_checked
+    && !policy.trusted_app_bundle_checked && !policy.trusted_workspace_checked){
     const ProcessRule *rule = NULL;
     int matches = matching_allow_rule(cfg, target, &rule);
     if (matches > 1){ fprintf(stderr, "ERROR: executable path matches multiple allowProcesses entries: %s\n", target); return 1; }

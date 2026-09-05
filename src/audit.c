@@ -139,6 +139,7 @@ static void print_report(const AuditReport *report){
   printf("Unique executable paths: %zu\n", unique_path_count(report));
   print_section(report, "APPLE SYSTEM", CONNECTION_ALLOWED_APPLE_SYSTEM);
   print_section(report, "TRUSTED PUBLISHER", CONNECTION_ALLOWED_TRUSTED_PUBLISHER);
+  print_section(report, "TRUSTED APP BUNDLE", CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE);
   print_section(report, "TRUSTED WORKSPACE", CONNECTION_ALLOWED_TRUSTED_WORKSPACE);
   print_section(report, "ALLOWED", CONNECTION_ALLOWED_CONFIG);
   print_section(report, "DENIED", CONNECTION_DENIED);

@@ -17,6 +17,7 @@ typedef struct {
   size_t unique_executable_paths;
   size_t apple_trusted_decisions;
   size_t trusted_publisher_matches;
+  size_t trusted_app_bundle_matches;
   size_t trusted_workspace_matches;
   size_t trusted_publisher_invalid_signatures;
   size_t trusted_publisher_team_id_mismatches;

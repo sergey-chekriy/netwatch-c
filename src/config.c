@@ -23,6 +23,7 @@ void config_free(Config *cfg){
   strlist_free(&cfg->allow_remote_hosts);
   process_rules_free(&cfg->allow_processes);
   trusted_publisher_rules_free(&cfg->trusted_publishers);
+  trusted_app_bundle_rules_free(&cfg->trusted_app_bundles);
   trusted_workspace_rules_free(&cfg->trusted_workspaces);
   *cfg = (Config){0};
 }
@@ -185,6 +186,102 @@ static int parse_trusted_publishers(cJSON *json, TrustedPublisherRules *out, cha
   if (!cJSON_IsObject(json)){ set_error(err, err_len, "trustedPublishers must be an object"); return 0; }
   for (cJSON *item = json->child; item; item = item->next){
     if (!parse_trusted_publisher_rule(item, out, err, err_len)) return 0;
+  }
+  return 1;
+}
+
+static int known_trusted_app_bundle_field(const char *field){
+  static const char *known[] = {
+    "bundleRoot", "teamId", "allowedSigningIdentifiers",
+    "allowedSigningIdentifierPrefixes", "allowSubdirectories"
+  };
+  for (size_t i = 0; i < sizeof(known) / sizeof(*known); i++) if (field && !strcmp(field, known[i])) return 1;
+  return 0;
+}
+
+static int parse_trusted_app_bundle_identifiers(cJSON *json, StrList *out, const char *where,
+  char *err, size_t err_len){
+  if (!json) return 1;
+  if (!cJSON_IsArray(json)){ set_error(err, err_len, "%s must be an array", where); return 0; }
+  int index = 0;
+  cJSON *identifier = NULL;
+  cJSON_ArrayForEach(identifier, json){
+    char item_where[256]; snprintf(item_where, sizeof(item_where), "%s[%d]", where, index++);
+    if (!cJSON_IsString(identifier) || !identifier->valuestring || !identifier->valuestring[0]){
+      set_error(err, err_len, "%s expected non-empty string", item_where);
+      return 0;
+    }
+    if (strchr(identifier->valuestring, '*')){
+      set_error(err, err_len, "%s wildcards are not supported", item_where);
+      return 0;
+    }
+    if (!strlist_push(out, identifier->valuestring)){
+      set_error(err, err_len, "out of memory parsing %s", item_where);
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int parse_trusted_app_bundle_rule(cJSON *item, TrustedAppBundleRules *out,
+  char *err, size_t err_len){
+  if (!item->string || !item->string[0]){
+    set_error(err, err_len, "trustedAppBundles entries must have non-empty names");
+    return 0;
+  }
+  char where[256]; snprintf(where, sizeof(where), "trustedAppBundles.%s", item->string);
+  if (!cJSON_IsObject(item)){ set_error(err, err_len, "%s must be an object", where); return 0; }
+  for (cJSON *field = item->child; field; field = field->next){
+    if (!known_trusted_app_bundle_field(field->string)){
+      set_error(err, err_len, "%s.%s unsupported field", where, field->string ? field->string : "(unknown)");
+      return 0;
+    }
+  }
+
+  const char *bundle_root = NULL, *team_id = NULL;
+  StrList identifiers = {0}, prefixes = {0};
+  snprintf(where, sizeof(where), "trustedAppBundles.%s.bundleRoot", item->string);
+  if (!parse_required_nonempty_string(cJSON_GetObjectItemCaseSensitive(item, "bundleRoot"), where,
+    &bundle_root, err, err_len)) goto fail;
+  size_t root_len = strlen(bundle_root);
+  if (bundle_root[0] != '/' || strchr(bundle_root, '*') || root_len < 5 || strcmp(bundle_root + root_len - 4, ".app")){
+    set_error(err, err_len, "%s expected exact absolute .app bundle path", where);
+    goto fail;
+  }
+  snprintf(where, sizeof(where), "trustedAppBundles.%s.teamId", item->string);
+  if (!parse_required_nonempty_string(cJSON_GetObjectItemCaseSensitive(item, "teamId"), where,
+    &team_id, err, err_len)) goto fail;
+  snprintf(where, sizeof(where), "trustedAppBundles.%s.allowedSigningIdentifiers", item->string);
+  if (!parse_trusted_app_bundle_identifiers(cJSON_GetObjectItemCaseSensitive(item,
+    "allowedSigningIdentifiers"), &identifiers, where, err, err_len)) goto fail;
+  snprintf(where, sizeof(where), "trustedAppBundles.%s.allowedSigningIdentifierPrefixes", item->string);
+  if (!parse_trusted_app_bundle_identifiers(cJSON_GetObjectItemCaseSensitive(item,
+    "allowedSigningIdentifierPrefixes"), &prefixes, where, err, err_len)) goto fail;
+  if (!identifiers.len && !prefixes.len){
+    set_error(err, err_len, "trustedAppBundles.%s requires at least one allowed signing identifier or prefix", item->string);
+    goto fail;
+  }
+  snprintf(where, sizeof(where), "trustedAppBundles.%s.allowSubdirectories", item->string);
+  cJSON *allow_subdirs = cJSON_GetObjectItemCaseSensitive(item, "allowSubdirectories");
+  if (!cJSON_IsBool(allow_subdirs)){ set_error(err, err_len, "%s must be boolean", where); goto fail; }
+  if (!trusted_app_bundle_rules_push(out, item->string, bundle_root, team_id, &identifiers, &prefixes,
+    cJSON_IsTrue(allow_subdirs))){
+    set_error(err, err_len, "out of memory parsing trustedAppBundles");
+    goto fail;
+  }
+  return 1;
+
+fail:
+  strlist_free(&identifiers);
+  strlist_free(&prefixes);
+  return 0;
+}
+
+static int parse_trusted_app_bundles(cJSON *json, TrustedAppBundleRules *out, char *err, size_t err_len){
+  if (!json) return 1;
+  if (!cJSON_IsObject(json)){ set_error(err, err_len, "trustedAppBundles must be an object"); return 0; }
+  for (cJSON *item = json->child; item; item = item->next){
+    if (!parse_trusted_app_bundle_rule(item, out, err, err_len)) return 0;
   }
   return 1;
 }
@@ -364,6 +461,7 @@ int config_parse_text(Config *cfg, const char *text, const char *source, char *e
     && parse_string_array(cJSON_GetObjectItemCaseSensitive(root, "allowRemoteHosts"), &cfg->allow_remote_hosts, "allowRemoteHosts", err, err_len)
     && parse_allow_processes(cJSON_GetObjectItemCaseSensitive(root, "allowProcesses"), &cfg->allow_processes, err, err_len)
     && parse_trusted_publishers(cJSON_GetObjectItemCaseSensitive(root, "trustedPublishers"), &cfg->trusted_publishers, err, err_len)
+    && parse_trusted_app_bundles(cJSON_GetObjectItemCaseSensitive(root, "trustedAppBundles"), &cfg->trusted_app_bundles, err, err_len)
     && parse_trusted_workspaces(cJSON_GetObjectItemCaseSensitive(root, "trustedWorkspaces"), &cfg->trusted_workspaces, err, err_len)
     && parse_daemon(cJSON_GetObjectItemCaseSensitive(root, "daemon"), &cfg->daemon, err, err_len);
   cJSON_Delete(root);

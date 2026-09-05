@@ -10,10 +10,11 @@ It periodically:
 2. resolves each process executable path;
 3. checks deny and allow rules;
 4. identifies configured trusted third-party publishers;
-5. identifies trusted workspaces for interpreter-based scripts;
-6. identifies trusted Apple system components;
-7. logs unknown processes;
-8. optionally disables Wi-Fi.
+5. identifies configured trusted signed app bundle helpers;
+6. identifies trusted workspaces for interpreter-based scripts;
+7. identifies trusted Apple system components;
+8. logs unknown processes;
+9. optionally disables Wi-Fi.
 
 The program must remain:
 
@@ -50,8 +51,9 @@ Existing modules:
 - `config_check` - standalone config validation command;
 - `app_discovery` - installed macOS `.app` discovery JSON;
 - `process` - process and executable-path discovery;
-- `allow` - centralized deny/trusted-publisher/allow/Apple-trust decision logic;
+- `allow` - centralized deny/signed-trust/allow/Apple-trust decision logic;
 - `trusted_publisher` - third-party signed identity rule verification;
+- `trusted_app_bundle` - canonical app-bundle containment and signed helper verification;
 - `why` - standalone explanation of one path decision;
 - `monitor` - normal scan, logging, enforcement, dry-run, and stats orchestration;
 - `audit` - non-enforcing observation report;
@@ -90,11 +92,12 @@ Rules must be evaluated in this order:
 ```text
 1. deny rule
 2. trusted publisher rule
-3. trusted workspace rule
-4. localhost LISTEN rule
-5. explicit allow rule
-6. trusted Apple system component
-7. unknown process
+3. trusted app bundle rule
+4. trusted workspace rule
+5. localhost LISTEN rule
+6. explicit allow rule
+7. trusted Apple system component
+8. unknown process
 ```
 
 Deny rules always have the highest priority.
@@ -106,7 +109,7 @@ failure is terminal for the executable in that policy evaluation.
 
 `allowProcesses` remains the explicit path-only allow layer for legacy/manual exceptions,
 optional local tools, and exact system executables outside automatic Apple-trust roots.
-It is intentionally weaker than `trustedPublishers` because it does not verify signed identity.
+It is intentionally weaker than `trustedPublishers` and `trustedAppBundles` because it does not verify signed identity.
 
 ## 5. Result types
 
@@ -298,6 +301,9 @@ apple_trust.c
 trusted_publisher.c
     evaluates configured third-party path, Team ID and signing identifier
 
+trusted_app_bundle.c
+    canonicalizes bundle/helper paths and verifies Team ID and allowed signing identifiers
+
 trusted_workspace.c
     evaluates configured interpreter path, process cwd and resolved script path
 
@@ -384,6 +390,7 @@ Policy order:
 ```text
 deny
 -> trusted publisher rule
+-> trusted app bundle rule
 -> trusted workspace rule
 -> localhost LISTEN
 -> explicit path/remote allow
@@ -410,6 +417,14 @@ The platform layer obtains signed identity metadata with Security.framework. It 
 signature before reading `kSecCodeInfoTeamIdentifier` and `kSecCodeInfoIdentifier`. The runtime
 does not use executable hashes, certificate common names, display names, versions, or modification
 times for trusted publisher decisions.
+
+### 10.3.1 Trusted app bundle verification
+
+Trusted app bundle rules are separate from exact `trustedPublishers` and path-only
+`allowProcesses`. The evaluator canonicalizes both paths, requires component-aware containment,
+rejects symlink escapes, validates the helper signature, matches Team ID exactly, and matches the
+signing identifier against an explicit exact or prefix list. A matching bundle rule that fails any
+check is terminal `unknown`; it never falls through to weaker trust sources.
 
 ## 10.4 Trusted workspace rules
 

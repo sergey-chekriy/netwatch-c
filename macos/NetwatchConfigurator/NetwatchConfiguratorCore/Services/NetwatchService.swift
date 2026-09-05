@@ -163,6 +163,40 @@ public final class NetwatchService {
     ]))
   }
 
+  public func addTrustedAppBundle(_ app: DiscoveredApp, helpers: [DiscoveredApp], configPath: String) async throws -> String {
+    guard app.parentBundlePath == nil, app.suitableTrustedPublisher else {
+      throw NetwatchServiceError.commandFailed("A valid signed top-level app is required.")
+    }
+    try ensureWritable(configPath)
+    var seen = Set<String>()
+    let identifiers = ([app] + helpers)
+      .filter { $0.signatureValid && $0.teamId == app.teamId && !$0.signingIdentifier.isEmpty }
+      .map(\.signingIdentifier)
+      .filter { seen.insert($0).inserted }
+    var arguments = [
+      "--config-add-trusted-app-bundle", app.displayName,
+      "--bundle-root", app.bundlePath,
+      "--team-id", app.teamId
+    ]
+    for identifier in identifiers {
+      arguments.append(contentsOf: ["--signing-identifier", identifier])
+    }
+    arguments.append(contentsOf: [
+      "--signing-identifier-prefix", app.signingIdentifier + ".",
+      "--allow-subdirectories", "true",
+      "--config", configPath
+    ])
+    return try checked(await run(arguments: arguments, timeout: 20))
+  }
+
+  public func removeTrustedAppBundle(name: String, configPath: String) async throws -> String {
+    try ensureWritable(configPath)
+    return try checked(await run(arguments: [
+      "--config-remove-trusted-app-bundle", name,
+      "--config", configPath
+    ]))
+  }
+
   public func addAllowProcess(_ form: AllowProcessForm, configPath: String) async throws -> String {
     if let error = form.validationError() { throw NetwatchServiceError.commandFailed(error) }
     try ensureWritable(configPath)

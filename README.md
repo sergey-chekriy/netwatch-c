@@ -34,6 +34,7 @@ The goal is to have a small, auditable, local watcher for a personal allowlist-b
 - Automatically allows localhost `LISTEN` connections.
 - Can automatically trust Apple system components when explicitly enabled.
 - Can verify configured third-party apps by signed publisher identity.
+- Can trust explicitly selected signed helpers inside a verified `.app` bundle.
 - Logs suspicious connections with executable path.
 - Can disable Wi-Fi when suspicious activity is detected.
 - Can print runtime statistics for a normal monitoring pass.
@@ -446,7 +447,7 @@ Discover installed `.app` bundles:
 ./netwatch --discover-apps --json
 ```
 
-The JSON contains one item per discovered app with `displayName`, `bundlePath`, `executablePath`, `teamId`, `signingIdentifier`, `signatureValid`, `appleSigned`, and `suitableTrustedPublisher`. Discovery scans `/Applications`, `/System/Applications`, `~/Applications`, and app extensions under each discovered app's `Contents/PlugIns/*.appex`. It never adds rules automatically.
+The JSON contains one item per discovered app or helper with `displayName`, `bundlePath`, `parentBundlePath`, `executablePath`, `teamId`, `signingIdentifier`, `signatureValid`, `appleSigned`, `suitableTrustedPublisher`, and `signedHelperCandidate`. Discovery scans `/Applications`, `/System/Applications`, `~/Applications`, and standard helper locations inside each app, including Frameworks, Helpers, XPCServices, PlugIns, LoginItems, direct executables in `Contents/Resources`, and `Resources/native`. It never adds rules automatically.
 
 Show a config in deterministic format:
 
@@ -494,6 +495,23 @@ Add or remove trusted publisher rules:
 
 Adding a trusted publisher requires the executable to exist and its current Security.framework identity to match the provided Team ID and signing identifier. The command does not infer or invent identity values.
 
+Add or remove a signed app bundle rule:
+
+```bash
+./netwatch --config-add-trusted-app-bundle "ChatGPT" \
+  --bundle-root "/Applications/ChatGPT.app" \
+  --team-id "2DC432GLL2" \
+  --signing-identifier "com.openai.codex" \
+  --signing-identifier-prefix "com.openai.codex." \
+  --allow-subdirectories true \
+  --config /path/to/netwatch.config.json
+
+./netwatch --config-remove-trusted-app-bundle "ChatGPT" \
+  --config /path/to/netwatch.config.json
+```
+
+The add command verifies that the `.app` exists, its signature is valid, and its Team ID matches before writing the rule. Repeat `--signing-identifier` and `--signing-identifier-prefix` as needed. Nothing is trusted automatically.
+
 Add or remove trusted workspace rules:
 
 ```bash
@@ -537,7 +555,7 @@ Add or remove legacy path-only allow rules:
   --config /path/to/netwatch.config.json
 ```
 
-Path-only rules preserve the existing `allowProcesses` semantics and are weaker than `trustedPublishers`: they do not verify Team ID or signing identifier. Use them for explicit legacy/manual rules, optional local tools such as `/usr/bin/ssh` or `/usr/bin/scp`, Apple executables outside automatic Apple roots, apps that cannot currently be verified as trusted publishers, or app helpers that are not yet modeled as trusted publisher paths. The configurator can add path-only rules from manual paths, discovered `.app` bundles, and discovered extension executables, and can edit existing rule names and paths without hand-editing JSON.
+Path-only rules preserve the existing `allowProcesses` semantics and are weaker than `trustedPublishers` and `trustedAppBundles`: they do not verify Team ID or signing identifier. Use them for explicit legacy/manual rules, optional local tools such as `/usr/bin/ssh` or `/usr/bin/scp`, Apple executables outside automatic Apple roots, or apps without usable signed identity. The configurator recommends a signed app bundle rule instead of a path-only bundle wildcard when signed identity is available.
 
 WhatsApp may start signed extensions such as `ServiceExtension.appex` separately from the main app. Prefer adding the discovered `WhatsApp - ServiceExtension` item as a trusted publisher. Manual equivalent:
 
@@ -564,7 +582,7 @@ This sends the existing daemon reload signal and does not start or stop the daem
 Recommended workflow:
 
 1. `./netwatch --discover-apps --json`
-2. Add one reviewed trusted publisher or trusted workspace rule.
+2. Add one reviewed trusted publisher, trusted app bundle, or trusted workspace rule.
 3. `./netwatch --check-config /path/to/netwatch.config.json`
 4. `./netwatch --reload-daemon`
 
@@ -585,7 +603,7 @@ The converter validates the existing config, adds:
 
 It preserves unrelated fields, deny rules, remote-host rules, and third-party allow entries. It removes explicit Apple system-component allow entries only when the configured path is an exact existing executable path and the same Security.framework verifier used at runtime confirms it as a trusted Apple system component. Wildcards, missing paths, unverified paths, third-party paths, and ambiguous entries are preserved.
 
-The converter preserves `trustedPublishers` entries unchanged. It never invents Team IDs, never invents signing identifiers, and never migrates `allowProcesses` entries into trusted publisher rules automatically.
+The converter preserves `trustedPublishers` and `trustedAppBundles` entries unchanged. It never invents Team IDs, never invents signing identifiers, and never migrates `allowProcesses` entries into signed trust rules automatically.
 
 Before replacing the file, the converter writes a byte-for-byte backup using the first available name:
 
@@ -637,9 +655,9 @@ Validate a config without starting monitoring:
 ./netwatch --check-config /path/to/netwatch.config.json
 ```
 
-Exit status is `0` for a valid config, including valid configs with warnings. Invalid JSON, unsupported schema versions, wrong required types, unsupported `allowProcesses` or `trustedPublishers` value types, unreadable files, and command-line usage errors return non-zero.
+Exit status is `0` for a valid config, including valid configs with warnings. Invalid JSON, unsupported schema versions, wrong required types, unsupported `allowProcesses`, `trustedPublishers`, or `trustedAppBundles` value types, unreadable files, and command-line usage errors return non-zero.
 
-The checker reuses the normal config parser, then reports warnings for duplicate allow or deny entries where detectable, duplicate trusted publisher exact paths, invalid wildcard placement, malformed executable paths, nonexistent exact executable paths, Apple trust verification failures for Apple-system-looking allow entries when automatic Apple trust is enabled, trusted publisher identity mismatches for currently installed executables, and deny rules that appear to shadow allow entries.
+The checker reuses the normal config parser, then reports warnings for duplicate allow or deny entries where detectable, duplicate trusted publisher exact paths, invalid wildcard placement, malformed or missing executable paths and app bundle roots, Apple trust verification failures for Apple-system-looking allow entries when automatic Apple trust is enabled, trusted publisher identity mismatches for currently installed executables, and deny rules that appear to shadow allow entries.
 
 Examples:
 
@@ -705,6 +723,17 @@ Reason:
 ```
 
 ```text
+Decision: ALLOWED
+Trust source: TRUSTED_APP_BUNDLE
+
+Reason:
+Bundle rule: ChatGPT
+Team ID matched
+Signing identifier matched
+Executable is inside bundle root
+```
+
+```text
 Decision: UNKNOWN
 Trust source: NONE
 
@@ -730,10 +759,10 @@ Reason:
   not an automatically trusted Apple system component
 ```
 
-Explicit deny still has priority over trusted publishers, trusted workspaces, explicit allow, and Apple system trust:
+Explicit deny still has priority over every trust source:
 
 ```text
-deny -> trusted publisher -> trusted workspace -> explicit allow -> Apple system trust -> unknown
+deny -> trusted publisher -> trusted app bundle -> trusted workspace -> localhost LISTEN -> explicit allow -> Apple system trust -> unknown
 ```
 
 `--why` exits before `lsof`, process scanning, monitoring loops, launchd-specific runtime behavior, or Wi-Fi changes. It accepts an absolute executable path or a PID. Use a PID when explaining interpreter-based trusted workspace rules because cwd and argv are process metadata.
@@ -753,6 +782,7 @@ Example:
   },
   "allowAppleSystemComponents": true,
   "trustedPublishers": {},
+  "trustedAppBundles": {},
   "trustedWorkspaces": {},
   "interface": "Wi-Fi",
   "logPath": "/Users/serg/.watch/netwatch.log",
@@ -883,6 +913,30 @@ These commands are only documentation aids. `netwatch` itself uses Security.fram
 
 Manual migration is optional: move one reviewed path from `allowProcesses` into `trustedPublishers`, fill in the observed Team ID and signing identifier, then run `./netwatch --check-config /path/to/config.json`. Existing `allowProcesses` rules remain supported for paths not covered by a trusted publisher rule.
 
+### `trustedAppBundles`
+
+`trustedAppBundles` allows signed executables below one explicitly selected macOS app bundle without relying on a path-only wildcard:
+
+```json
+"trustedAppBundles": {
+  "ChatGPT": {
+    "bundleRoot": "/Applications/ChatGPT.app",
+    "teamId": "2DC432GLL2",
+    "allowedSigningIdentifiers": [
+      "com.openai.codex"
+    ],
+    "allowedSigningIdentifierPrefixes": [
+      "com.openai.codex."
+    ],
+    "allowSubdirectories": true
+  }
+}
+```
+
+`bundleRoot` must be an exact absolute `.app` path. At least one exact identifier or prefix is required. Runtime trust requires the executable and bundle root to canonicalize successfully, the canonical executable to remain inside the canonical bundle root, a valid non-ad-hoc code signature with identity metadata, an exact Team ID match, and an exact or prefix signing identifier match. A symlink that escapes the bundle is rejected.
+
+If a path belongs to a configured bundle but any of these checks fails, the decision is unknown and weaker `trustedWorkspaces`, `allowProcesses`, remote-host, or Apple-system rules are not considered. `trustedAppBundles` is independent from the weaker path-only app bundle wildcard in `allowProcesses`.
+
 ### `trustedWorkspaces`
 
 `trustedWorkspaces` is for interpreter-based scripts. It lets you allow `node`, `python`, `ruby`, `bash`, or another interpreter only when the process cwd and resolved script path are inside an explicitly trusted project root:
@@ -936,7 +990,7 @@ The tool logs suspicious connections, dry-run/enforcement messages, and errors. 
 
 ### `verboseLog`
 
-When `verboseLog` is `false` or omitted, the log keeps only problems: suspicious connections, dry-run/enforcement messages, and errors. When `true`, it also writes routine successful trusted publisher and trusted workspace decisions:
+When `verboseLog` is `false` or omitted, the log keeps only problems: suspicious connections, dry-run/enforcement messages, and errors. When `true`, it also writes routine successful trusted publisher, trusted app bundle, and trusted workspace decisions:
 
 ```json
 "verboseLog": false
@@ -1026,13 +1080,15 @@ For each active connection:
 1. If the line matches denyPatterns → suspicious
 2. Else if executable path matches trustedPublishers and publisher identity verifies → allowed
 3. Else if executable path matches trustedPublishers but verification fails → suspicious
-4. Else if interpreter path matches trustedWorkspaces and cwd/script verify → allowed
-5. Else if interpreter path matches trustedWorkspaces but cwd/script verification fails → suspicious
-6. Else if it is localhost LISTEN → allowed
-7. Else if process name and executable path match allowProcesses → allowed
-8. Else if remote host starts with one of allowRemoteHosts → allowed
-9. Else if allowAppleSystemComponents is true and the executable is a trusted Apple system component → allowed
-10. Else → suspicious
+4. Else if executable path is inside trustedAppBundles and signed bundle identity verifies → allowed
+5. Else if executable path belongs to trustedAppBundles but verification fails → suspicious
+6. Else if interpreter path matches trustedWorkspaces and cwd/script verify → allowed
+7. Else if interpreter path matches trustedWorkspaces but cwd/script verification fails → suspicious
+8. Else if it is localhost LISTEN → allowed
+9. Else if process name and executable path match allowProcesses → allowed
+10. Else if remote host starts with one of allowRemoteHosts → allowed
+11. Else if allowAppleSystemComponents is true and the executable is a trusted Apple system component → allowed
+12. Else → suspicious
 ```
 
 When suspicious connections are found, the log entry looks like this:
@@ -1063,6 +1119,8 @@ Successful trusted publisher decisions are logged distinctly from ordinary path-
   ACTUAL TEAM ID: EXPECTED_TEAM_ID
   ACTUAL SIGNING IDENTIFIER: com.google.Chrome
 ```
+
+Successful signed app helper decisions use the separate `[TRUSTED_APP_BUNDLE]` source and include the bundle rule, bundle root, Team ID, and signing identifier. As with other successful trust decisions, these routine entries are written only when `verboseLog` is `true`.
 
 Successful trusted workspace decisions are logged separately:
 
@@ -1218,7 +1276,7 @@ tail -50 ~/.watch/netwatch.launchd.out.log
 tail -50 ~/.watch/netwatch.launchd.err.log
 ```
 
-The main log is written for suspicious connections, dry-run/enforcement messages, and errors. With `verboseLog: true`, it also records successful trusted publisher and trusted workspace decisions. Successful `OK` checks are printed during manual runs but not appended to the main log.
+The main log is written for suspicious connections, dry-run/enforcement messages, and errors. With `verboseLog: true`, it also records successful trusted publisher, trusted app bundle, and trusted workspace decisions. Successful `OK` checks are printed during manual runs but not appended to the main log.
 
 ## Tuning the allowlist
 
@@ -1282,7 +1340,7 @@ If logPath is omitted in netwatch.config.json, the tool uses:
 $HOME/.watch/netwatch.log
 ```
 
-The tool logs suspicious connections, dry-run/enforcement messages, and errors. With `verboseLog: true`, it also records successful trusted publisher and trusted workspace decisions. It does not write OK runs to the log.
+The tool logs suspicious connections, dry-run/enforcement messages, and errors. With `verboseLog: true`, it also records successful trusted publisher, trusted app bundle, and trusted workspace decisions. It does not write OK runs to the log.
 
 ## JSON parser note
 

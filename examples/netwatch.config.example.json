@@ -8,6 +8,7 @@
   },
   "allowAppleSystemComponents": true,
   "trustedPublishers": {},
+  "trustedAppBundles": {},
   "trustedWorkspaces": {},
   "interface": "Wi-Fi",
   "verboseLog": false,

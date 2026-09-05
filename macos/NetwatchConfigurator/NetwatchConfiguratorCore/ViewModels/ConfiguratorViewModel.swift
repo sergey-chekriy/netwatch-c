@@ -52,9 +52,26 @@ public final class ConfiguratorViewModel: ObservableObject {
     }
   }
 
+  public var filteredTopLevelApps: [DiscoveredApp] {
+    let topLevel = apps.filter { $0.parentBundlePath == nil }
+    guard !searchText.isEmpty else { return topLevel }
+    return topLevel.filter { app in
+      appMatchesSearch(app) || helpers(for: app).contains(where: appMatchesSearch)
+    }
+  }
+
+  public func helpers(for app: DiscoveredApp) -> [DiscoveredApp] {
+    apps.filter { $0.parentBundlePath == app.bundlePath }
+  }
+
   public func trustedPublisherName(for app: DiscoveredApp) -> String? {
     if config?.trustedPublishers?[app.displayName] != nil { return app.displayName }
     return config?.publisherItems.first { $0.rule.paths.contains(app.executablePath) }?.name
+  }
+
+  public func trustedAppBundleName(for app: DiscoveredApp) -> String? {
+    let root = app.parentBundlePath ?? app.bundlePath
+    return config?.appBundleItems.first { $0.rule.bundleRoot == root }?.name
   }
 
   public func pathOnlyAllows(for app: DiscoveredApp) -> [AllowProcessItem] {
@@ -168,6 +185,20 @@ public final class ConfiguratorViewModel: ObservableObject {
   public func removeTrustedPublisher(name: String) async {
     await perform("Trusted publisher removed. Reload daemon when ready.") {
       lastCommandOutput = try await service.removeTrustedPublisher(name: name, configPath: configPath)
+      await refreshConfig()
+    }
+  }
+
+  public func addTrustedAppBundle(_ app: DiscoveredApp) async {
+    await perform("Signed app helpers added as trusted. Reload daemon when ready.") {
+      lastCommandOutput = try await service.addTrustedAppBundle(app, helpers: helpers(for: app), configPath: configPath)
+      await refreshConfig()
+    }
+  }
+
+  public func removeTrustedAppBundle(name: String) async {
+    await perform("Trusted app bundle removed. Reload daemon when ready.") {
+      lastCommandOutput = try await service.removeTrustedAppBundle(name: name, configPath: configPath)
       await refreshConfig()
     }
   }
@@ -312,5 +343,11 @@ public final class ConfiguratorViewModel: ObservableObject {
       return executable.hasPrefix(String(rulePath.dropLast()))
     }
     return rulePath.hasPrefix(bundle + "/")
+  }
+
+  private func appMatchesSearch(_ app: DiscoveredApp) -> Bool {
+    app.displayName.localizedCaseInsensitiveContains(searchText)
+      || app.bundlePath.localizedCaseInsensitiveContains(searchText)
+      || app.executablePath.localizedCaseInsensitiveContains(searchText)
   }
 }

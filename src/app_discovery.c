@@ -64,7 +64,11 @@ int app_discovery_print_json(const DiscoveredApp *apps, size_t app_count){
       || !buf_add(&buf, "      \"bundlePath\": ") || !json_string(&buf, app->bundle_path) || !buf_add(&buf, ",\n")
       || !buf_add(&buf, "      \"displayName\": ") || !json_string(&buf, app->display_name) || !buf_add(&buf, ",\n")
       || !buf_add(&buf, "      \"executablePath\": ") || !json_string(&buf, app->executable_path) || !buf_add(&buf, ",\n")
+      || !buf_add(&buf, "      \"parentBundlePath\": ")
+      || (app->parent_bundle_path[0] ? !json_string(&buf, app->parent_bundle_path) : !buf_add(&buf, "null"))
+      || !buf_add(&buf, ",\n")
       || !buf_add(&buf, "      \"signatureValid\": ") || !buf_add(&buf, json_bool(app->signature_valid)) || !buf_add(&buf, ",\n")
+      || !buf_add(&buf, "      \"signedHelperCandidate\": ") || !buf_add(&buf, json_bool(app->signed_helper_candidate)) || !buf_add(&buf, ",\n")
       || !buf_add(&buf, "      \"signingIdentifier\": ") || !json_string(&buf, app->signing_identifier) || !buf_add(&buf, ",\n")
       || !buf_add(&buf, "      \"suitableTrustedPublisher\": ") || !buf_add(&buf, json_bool(app->suitable_trusted_publisher)) || !buf_add(&buf, ",\n")
       || !buf_add(&buf, "      \"teamId\": ") || !json_string(&buf, app->team_id) || !buf_add(&buf, "\n    }")) goto fail;
@@ -163,9 +167,11 @@ static int app_list_push(AppList *list, const DiscoveredApp *app){
   return 1;
 }
 
-static int discover_bundle(const char *bundle_path, const char *display_prefix, char display_out[256], const NetwatchPlatform *platform, AppList *apps){
+static int discover_bundle(const char *bundle_path, const char *display_prefix,
+  const char *parent_bundle_path, char display_out[256], const NetwatchPlatform *platform, AppList *apps){
   DiscoveredApp app = {0};
   snprintf(app.bundle_path, sizeof(app.bundle_path), "%s", bundle_path);
+  if (parent_bundle_path) snprintf(app.parent_bundle_path, sizeof(app.parent_bundle_path), "%s", parent_bundle_path);
   if (!bundle_metadata(bundle_path, app.display_name, app.executable_path)) return 1;
   if (display_out) snprintf(display_out, 256, "%s", app.display_name);
   if (display_prefix && *display_prefix){
@@ -183,6 +189,7 @@ static int discover_bundle(const char *bundle_path, const char *display_prefix, 
     snprintf(app.signing_identifier, sizeof(app.signing_identifier), "%s", identity.signing_identifier);
   }
   app.suitable_trusted_publisher = app.signature_valid && !app.apple_signed && app.team_id[0] && app.signing_identifier[0];
+  app.signed_helper_candidate = app.parent_bundle_path[0] && app.suitable_trusted_publisher;
   return app_list_push(apps, &app);
 }
 
@@ -193,24 +200,91 @@ static char *join_path(const char *dir, const char *name){
   return out;
 }
 
-static int scan_bundle_plugins(const char *bundle_path, const char *display_name, const NetwatchPlatform *platform, AppList *apps){
-  char plugins[PATH_MAX];
-  int n = snprintf(plugins, sizeof(plugins), "%s/Contents/PlugIns", bundle_path);
-  if (n < 0 || (size_t)n >= sizeof(plugins)) return 1;
-  DIR *d = opendir(plugins);
-  if (!d) return 1;
+static int app_list_has_executable(const AppList *apps, const char *path){
+  for (size_t i = 0; i < apps->len; i++) if (!strcmp(apps->items[i].executable_path, path)) return 1;
+  return 0;
+}
+
+static int ignored_helper_file(const char *path){
+  static const char *suffixes[] = { ".dylib", ".node", ".so", ".a" };
+  for (size_t i = 0; i < sizeof(suffixes) / sizeof(*suffixes); i++){
+    if (has_suffix(path, suffixes[i])) return 1;
+  }
+  return 0;
+}
+
+static int discover_helper_file(const char *path, const char *bundle_path, const char *display_name,
+  const NetwatchPlatform *platform, AppList *apps){
+  if (app_list_has_executable(apps, path)) return 1;
+  CodeSignatureIdentity identity = {0};
+  if (platform->code_signature_identity(platform, path, &identity, NULL, 0) != CODE_SIGNATURE_IDENTITY_OK) return 1;
+  DiscoveredApp app = {0};
+  const char *base = strrchr(path, '/');
+  snprintf(app.display_name, sizeof(app.display_name), "%s - %s", display_name, base ? base + 1 : path);
+  snprintf(app.bundle_path, sizeof(app.bundle_path), "%s", bundle_path);
+  snprintf(app.parent_bundle_path, sizeof(app.parent_bundle_path), "%s", bundle_path);
+  snprintf(app.executable_path, sizeof(app.executable_path), "%s", path);
+  snprintf(app.team_id, sizeof(app.team_id), "%s", identity.team_id);
+  snprintf(app.signing_identifier, sizeof(app.signing_identifier), "%s", identity.signing_identifier);
+  app.signature_valid = 1;
+  app.apple_signed = signature_satisfies_requirement(path, CFSTR("anchor apple"));
+  app.suitable_trusted_publisher = !app.apple_signed;
+  app.signed_helper_candidate = app.suitable_trusted_publisher;
+  return app_list_push(apps, &app);
+}
+
+static int scan_helper_tree(const char *dir, const char *bundle_path, const char *display_name,
+  int depth, int max_depth, int scan_files, const NetwatchPlatform *platform, AppList *apps){
+  DIR *d = opendir(dir);
+  if (!d) return errno == ENOENT ? 1 : 0;
   struct dirent *ent;
   while ((ent = readdir(d))){
-    if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..") || !has_suffix(ent->d_name, ".appex")) continue;
-    char *path = join_path(plugins, ent->d_name);
+    if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+    char *path = join_path(dir, ent->d_name);
     if (!path){ closedir(d); return 0; }
     struct stat st;
-    if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode) && !discover_bundle(path, display_name, NULL, platform, apps)){
-      free(path); closedir(d); return 0;
+    if (lstat(path, &st) == 0){
+      int nested_bundle = S_ISDIR(st.st_mode)
+        && (has_suffix(ent->d_name, ".app") || has_suffix(ent->d_name, ".appex") || has_suffix(ent->d_name, ".xpc"));
+      if (nested_bundle){
+        if (!discover_bundle(path, display_name, bundle_path, NULL, platform, apps)){
+          free(path); closedir(d); return 0;
+        }
+      } else if (S_ISDIR(st.st_mode) && depth < max_depth){
+        if (!scan_helper_tree(path, bundle_path, display_name, depth + 1, max_depth, scan_files,
+          platform, apps)){
+          free(path); closedir(d); return 0;
+        }
+      } else if (scan_files && S_ISREG(st.st_mode) && (st.st_mode & 0111) && !ignored_helper_file(path)
+        && !discover_helper_file(path, bundle_path, display_name, platform, apps)){
+        free(path); closedir(d); return 0;
+      }
     }
     free(path);
   }
   closedir(d);
+  return 1;
+}
+
+static int scan_bundle_helpers(const char *bundle_path, const char *display_name,
+  const NetwatchPlatform *platform, AppList *apps){
+  static const struct { const char *path; int max_depth; int scan_files; } roots[] = {
+    { "Contents/Frameworks", 4, 0 },
+    { "Contents/Helpers", 4, 1 },
+    { "Contents/XPCServices", 2, 0 },
+    { "Contents/PlugIns", 2, 0 },
+    { "Contents/Library/LoginItems", 3, 0 },
+    { "Contents/Resources", 0, 1 },
+    { "Contents/Resources/native", 2, 1 }
+  };
+  for (size_t i = 0; i < sizeof(roots) / sizeof(*roots); i++){
+    char *root = join_path(bundle_path, roots[i].path);
+    if (!root) return 0;
+    int ok = scan_helper_tree(root, bundle_path, display_name, 0, roots[i].max_depth,
+      roots[i].scan_files, platform, apps);
+    free(root);
+    if (!ok) return 0;
+  }
   return 1;
 }
 
@@ -226,8 +300,8 @@ static int scan_dir(const char *dir, int depth, const NetwatchPlatform *platform
     if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode)){
       if (has_suffix(ent->d_name, ".app")){
         char display_name[256] = {0};
-        if (!discover_bundle(path, NULL, display_name, platform, apps)
-          || !scan_bundle_plugins(path, display_name, platform, apps)){
+        if (!discover_bundle(path, NULL, NULL, display_name, platform, apps)
+          || !scan_bundle_helpers(path, display_name, platform, apps)){
           free(path); closedir(d); return 0;
         }
       } else if (depth < 5 && !scan_dir(path, depth + 1, platform, apps)){

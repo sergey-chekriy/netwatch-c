@@ -872,6 +872,138 @@ static void test_trusted_publisher_policy(void){
   config_free(&cfg);
 }
 
+static void test_trusted_app_bundle_policy(void){
+  char *dir = temp_dir();
+  char *bundle = join_path_dup(dir, "ChatGPT.app");
+  char *contents = join_path_dup(bundle, "Contents");
+  char *macos = join_path_dup(contents, "MacOS");
+  char *frameworks = join_path_dup(contents, "Frameworks");
+  char *framework = join_path_dup(frameworks, "Runtime.framework");
+  char *versions = join_path_dup(framework, "Versions");
+  char *version = join_path_dup(versions, "A");
+  char *helpers = join_path_dup(version, "Helpers");
+  char *helper = join_path_dup(macos, "ChatGPT Helper");
+  char *versioned_helper = join_path_dup(helpers, "ChatGPT Helper (Renderer)");
+  char *outside = join_path_dup(dir, "Outside Helper");
+  char *escape = join_path_dup(macos, "Escaped Helper");
+  mkdir_ok(bundle); mkdir_ok(contents); mkdir_ok(macos); mkdir_ok(frameworks);
+  mkdir_ok(framework); mkdir_ok(versions); mkdir_ok(version); mkdir_ok(helpers);
+  write_text_mode(helper, "helper", 0700);
+  write_text_mode(versioned_helper, "renderer", 0700);
+  write_text_mode(outside, "outside", 0700);
+  assert(symlink(outside, escape) == 0);
+
+  char config_text[8192];
+  snprintf(config_text, sizeof(config_text),
+    "{\"version\":2,\"trustedAppBundles\":{\"ChatGPT\":{"
+    "\"bundleRoot\":\"%s\",\"teamId\":\"2DC432GLL2\","
+    "\"allowedSigningIdentifiers\":[\"com.openai.codex\"],"
+    "\"allowedSigningIdentifierPrefixes\":[\"com.openai.codex.\"],"
+    "\"allowSubdirectories\":true}},"
+    "\"allowProcesses\":{\"ChatGPT Helper\":\"%s\"}}\n",
+    bundle, helper);
+  Config cfg = parse_config_ok(config_text);
+  const char *line = "ChatGPT Helper 123 user TCP 1->2 (ESTABLISHED)";
+
+  FakePlatformState state = {
+    .team_id = "2DC432GLL2", .signing_identifier = "com.openai.codex"
+  };
+  NetwatchPlatform platform = fake_platform(&state);
+  ConnectionPolicy policy = connection_policy_for_path_with_platform(
+    line, "ChatGPT Helper", helper, &cfg, &platform);
+  assert(policy.decision == CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE);
+  assert(policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_OK);
+  assert(!strcmp(policy.matched_app_bundle, "ChatGPT"));
+  assert(state.identity_calls == 1);
+
+  state = (FakePlatformState){
+    .team_id = "2DC432GLL2", .signing_identifier = "com.openai.codex.renderer"
+  };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_path_with_platform(
+    line, "ChatGPT Helper", versioned_helper, &cfg, &platform);
+  assert(policy.decision == CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE);
+  assert(policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_OK);
+
+  state = (FakePlatformState){
+    .team_id = "2DC432GLL2", .signing_identifier = "com.openai.codex"
+  };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_path_with_platform(line, "Outside Helper", outside, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(!policy.trusted_app_bundle_checked);
+  assert(state.identity_calls == 0);
+
+  policy = connection_policy_for_path_with_platform(line, "ChatGPT Helper", escape, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_app_bundle_checked);
+  assert(policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_EXECUTABLE_OUTSIDE_ROOT);
+  assert(state.identity_calls == 0);
+
+  state = (FakePlatformState){
+    .team_id = "WRONGTEAM", .signing_identifier = "com.openai.codex"
+  };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_path_with_platform(line, "ChatGPT Helper", helper, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_TEAM_ID_MISMATCH);
+  assert(!policy.matched_process);
+
+  state = (FakePlatformState){
+    .team_id = "2DC432GLL2", .signing_identifier = "org.attacker.helper"
+  };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_path_with_platform(line, "ChatGPT Helper", helper, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_SIGNING_IDENTIFIER_MISMATCH);
+
+  state = (FakePlatformState){ .identity_result = CODE_SIGNATURE_IDENTITY_INVALID_SIGNATURE };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_path_with_platform(line, "ChatGPT Helper", helper, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_INVALID_SIGNATURE);
+
+  state = (FakePlatformState){ .identity_result = CODE_SIGNATURE_IDENTITY_METADATA_UNAVAILABLE };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_path_with_platform(line, "ChatGPT Helper", helper, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_app_bundle == TRUSTED_APP_BUNDLE_METADATA_UNAVAILABLE);
+
+  state = (FakePlatformState){
+    .team_id = "2DC432GLL2", .signing_identifier = "com.openai.codex.renderer"
+  };
+  platform = fake_platform(&state);
+  Capture cap = capture_why_platform(&cfg, versioned_helper, &platform);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "Decision: ALLOWED");
+  assert_contains(cap.out, "Trust source: TRUSTED_APP_BUNDLE");
+  assert_contains(cap.out, "Bundle rule: ChatGPT");
+  assert_contains(cap.out, "Team ID matched");
+  assert_contains(cap.out, "Signing identifier matched");
+  assert_contains(cap.out, "Executable is inside bundle root");
+  capture_free(&cap);
+
+  StrList publisher_paths = {0};
+  assert(strlist_push(&publisher_paths, helper));
+  assert(trusted_publisher_rules_push(&cfg.trusted_publishers, "Exact Helper", &publisher_paths,
+    "2DC432GLL2", "com.openai.codex"));
+  state = (FakePlatformState){
+    .team_id = "2DC432GLL2", .signing_identifier = "com.openai.codex"
+  };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_path_with_platform(line, "ChatGPT Helper", helper, &cfg, &platform);
+  assert(policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER);
+  assert(!policy.trusted_app_bundle_checked);
+  assert(state.identity_calls == 1);
+
+  config_free(&cfg);
+  unlink(escape); unlink(helper); unlink(versioned_helper); unlink(outside);
+  rmdir(helpers); rmdir(version); rmdir(versions); rmdir(framework); rmdir(frameworks);
+  rmdir(macos); rmdir(contents); rmdir(bundle); rmdir(dir);
+  free(bundle); free(contents); free(macos); free(frameworks); free(framework); free(versions);
+  free(version); free(helpers); free(helper); free(versioned_helper); free(outside); free(escape); free(dir);
+}
+
 static const char *available_apple_binary(void){
   static const char *paths[] = {
     "/usr/libexec/ciphermld",
@@ -1026,6 +1158,31 @@ static void test_config_trusted_publishers(void){
   assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[\"/A\"],\"teamId\":\"T\",\"signingIdentifier\":\"id\",\"requireValidSignature\":false}}}\n", "false is not supported for trusted publisher rules");
   assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[\"/A\"],\"teamId\":\"T\",\"signingIdentifier\":\"id\",\"hash\":\"no\"}}}\n", "trustedPublishers.App.hash unsupported field");
   assert_config_error("{\"trustedPublishers\":[]}\n", "trustedPublishers must be an object");
+}
+
+static void test_config_trusted_app_bundles(void){
+  Config cfg = parse_config_ok(
+    "{\"version\":2,\"trustedAppBundles\":{\"ChatGPT\":{"
+    "\"bundleRoot\":\"/Applications/ChatGPT.app\",\"teamId\":\"2DC432GLL2\","
+    "\"allowedSigningIdentifiers\":[\"com.openai.codex\"],"
+    "\"allowedSigningIdentifierPrefixes\":[\"com.openai.codex.\"],"
+    "\"allowSubdirectories\":true}}}\n");
+  assert(cfg.trusted_app_bundles.len == 1);
+  TrustedAppBundleRule *rule = &cfg.trusted_app_bundles.items[0];
+  assert(!strcmp(rule->name, "ChatGPT"));
+  assert(!strcmp(rule->bundle_root, "/Applications/ChatGPT.app"));
+  assert(!strcmp(rule->team_id, "2DC432GLL2"));
+  assert(!strcmp(rule->allowed_signing_identifiers.items[0], "com.openai.codex"));
+  assert(!strcmp(rule->allowed_signing_identifier_prefixes.items[0], "com.openai.codex."));
+  assert(rule->allow_subdirectories);
+  config_free(&cfg);
+
+  assert_config_error("{\"trustedAppBundles\":[]}\n", "trustedAppBundles must be an object");
+  assert_config_error("{\"trustedAppBundles\":{\"App\":{\"bundleRoot\":\"relative.app\",\"teamId\":\"T\",\"allowedSigningIdentifiers\":[\"id\"],\"allowSubdirectories\":true}}}\n", "expected exact absolute .app bundle path");
+  assert_config_error("{\"trustedAppBundles\":{\"App\":{\"bundleRoot\":\"/Applications/App.app\",\"teamId\":\"T\",\"allowSubdirectories\":true}}}\n", "requires at least one allowed signing identifier or prefix");
+  assert_config_error("{\"trustedAppBundles\":{\"App\":{\"bundleRoot\":\"/Applications/App.app\",\"teamId\":\"T\",\"allowedSigningIdentifierPrefixes\":[\"\"],\"allowSubdirectories\":true}}}\n", "expected non-empty string");
+  assert_config_error("{\"trustedAppBundles\":{\"App\":{\"bundleRoot\":\"/Applications/App.app\",\"teamId\":\"T\",\"allowedSigningIdentifiers\":[\"id\"]}}}\n", "allowSubdirectories must be boolean");
+  assert_config_error("{\"trustedAppBundles\":{\"App\":{\"bundleRoot\":\"/Applications/App.app\",\"teamId\":\"T\",\"allowedSigningIdentifiers\":[\"id\"],\"allowSubdirectories\":true,\"hash\":\"no\"}}}\n", "hash unsupported field");
 }
 
 static void test_config_trusted_workspaces(void){
@@ -1379,6 +1536,29 @@ static int call_remove_publisher(void *ctx){
   return config_backend_remove_trusted_publisher(c->config_path, c->name, c->platform);
 }
 
+typedef struct {
+  const char *config_path;
+  const char *name;
+  const char *bundle_root;
+  const char *team_id;
+  const char **identifiers;
+  size_t identifier_count;
+  const char **prefixes;
+  size_t prefix_count;
+  const NetwatchPlatform *platform;
+} AppBundleCtx;
+
+static int call_add_app_bundle(void *ctx){
+  AppBundleCtx *c = ctx;
+  return config_backend_add_trusted_app_bundle(c->config_path, c->name, c->bundle_root,
+    c->team_id, c->identifiers, c->identifier_count, c->prefixes, c->prefix_count, 1, c->platform);
+}
+
+static int call_remove_app_bundle(void *ctx){
+  RemoveCtx *c = ctx;
+  return config_backend_remove_trusted_app_bundle(c->config_path, c->name, c->platform);
+}
+
 typedef struct { const char *config_path; const char *name; const char *root; const char *interpreter; const NetwatchPlatform *platform; } WorkspaceCtx;
 static int call_add_workspace(void *ctx){
   WorkspaceCtx *c = ctx;
@@ -1433,14 +1613,16 @@ static void test_app_discovery_json(void){
       .suitable_trusted_publisher = 1
     },
     {
-      .display_name = "Apple App",
-      .bundle_path = "/System/Applications/Apple.app",
-      .executable_path = "/System/Applications/Apple.app/Contents/MacOS/Apple",
-      .team_id = "APPLE",
-      .signing_identifier = "com.apple.Apple",
+      .display_name = "Alpha - Alpha Helper",
+      .bundle_path = "/Applications/Alpha.app/Contents/Frameworks/Alpha Helper.app",
+      .parent_bundle_path = "/Applications/Alpha.app",
+      .executable_path = "/Applications/Alpha.app/Contents/Frameworks/Alpha Helper.app/Contents/MacOS/Alpha Helper",
+      .team_id = "TEAMID1234",
+      .signing_identifier = "com.example.Alpha.helper",
       .signature_valid = 1,
-      .apple_signed = 1,
-      .suitable_trusted_publisher = 0
+      .apple_signed = 0,
+      .suitable_trusted_publisher = 1,
+      .signed_helper_candidate = 1
     }
   };
   DiscoveryCtx ctx = { apps, 2 };
@@ -1453,8 +1635,9 @@ static void test_app_discovery_json(void){
   assert_contains(cap.out, "\"teamId\": \"TEAMID1234\"");
   assert_contains(cap.out, "\"signingIdentifier\": \"com.example.Alpha\"");
   assert_contains(cap.out, "\"signatureValid\": true");
-  assert_contains(cap.out, "\"appleSigned\": true");
-  assert_contains(cap.out, "\"suitableTrustedPublisher\": false");
+  assert_contains(cap.out, "\"parentBundlePath\": null");
+  assert_contains(cap.out, "\"parentBundlePath\": \"/Applications/Alpha.app\"");
+  assert_contains(cap.out, "\"signedHelperCandidate\": true");
   capture_free(&cap);
 }
 
@@ -1463,12 +1646,14 @@ static void test_config_backend_editing(void){
   char *config = join_path_dup(dir, "config.json");
   char *publisher_exe = join_path_dup(dir, "publisher");
   char *publisher_helper = join_path_dup(dir, "publisher-helper");
+  char *bundle_root = join_path_dup(dir, "Alpha.app");
   char *workspace_root = join_path_dup(dir, "workspace");
   char *workspace_root_two = join_path_dup(dir, "workspace2");
   char *interpreter = join_path_dup(dir, "node");
   char *interpreter_two = join_path_dup(dir, "python");
   mkdir_ok(workspace_root);
   mkdir_ok(workspace_root_two);
+  mkdir_ok(bundle_root);
   write_text_mode(publisher_exe, "x", 0700);
   write_text_mode(publisher_helper, "x", 0700);
   write_text_mode(interpreter, "x", 0700);
@@ -1712,6 +1897,37 @@ static void test_config_backend_editing(void){
   free(text);
   capture_free(&cap);
 
+  const char *bundle_identifiers[] = { "com.example.App", "com.example.App.helper" };
+  const char *bundle_prefixes[] = { "com.example.App." };
+  AppBundleCtx bundle_ctx = {
+    config, "Alpha App", bundle_root, "TEAMID1234", bundle_identifiers, 2,
+    bundle_prefixes, 1, &platform
+  };
+  state = (FakePlatformState){
+    .identity_result = CODE_SIGNATURE_IDENTITY_OK,
+    .team_id = "TEAMID1234",
+    .signing_identifier = "com.example.App"
+  };
+  platform = fake_platform(&state);
+  bundle_ctx.platform = &platform;
+  cap = capture_call(call_add_app_bundle, &bundle_ctx);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_contains(text, "\"trustedAppBundles\"");
+  assert_contains(text, "\"bundleRoot\":");
+  assert_contains(text, "\"com.example.App.helper\"");
+  assert_contains(text, "\"com.example.App.\"");
+  free(text);
+  capture_free(&cap);
+
+  RemoveCtx remove_bundle = { config, "Alpha App", &platform };
+  cap = capture_call(call_remove_app_bundle, &remove_bundle);
+  assert(cap.rc == 0);
+  text = must_read(config);
+  assert_not_contains(text, "\"Alpha App\"");
+  free(text);
+  capture_free(&cap);
+
   WorkspaceCtx ws = { config, "Scripts", workspace_root, interpreter, &platform };
   cap = capture_call(call_add_workspace, &ws);
   assert(cap.rc == 0);
@@ -1765,8 +1981,8 @@ static void test_config_backend_editing(void){
   capture_free(&cap);
 
   unlink(config); unlink(backup); unlink(publisher_exe); unlink(publisher_helper); unlink(interpreter); unlink(interpreter_two); unlink(not_exec);
-  rmdir(workspace_root); rmdir(workspace_root_two); rmdir(dir);
-  free(config); free(backup); free(publisher_exe); free(publisher_helper); free(workspace_root); free(workspace_root_two); free(interpreter); free(interpreter_two);
+  rmdir(bundle_root); rmdir(workspace_root); rmdir(workspace_root_two); rmdir(dir);
+  free(config); free(backup); free(publisher_exe); free(publisher_helper); free(bundle_root); free(workspace_root); free(workspace_root_two); free(interpreter); free(interpreter_two);
   free(log_path); free(missing_root); free(not_exec); free(dir);
 }
 
@@ -2561,18 +2777,25 @@ static void test_audit_mode(void){
   mkdir_ok(workspace_root);
   char *workspace_interpreter = join_path_dup(dir, "node");
   char *workspace_script = join_path_dup(workspace_root, "job.js");
+  char *bundle_root = join_path_dup(dir, "Audit.app");
+  char *bundle_contents = join_path_dup(bundle_root, "Contents");
+  char *bundle_helpers = join_path_dup(bundle_contents, "Helpers");
+  char *bundle_helper = join_path_dup(bundle_helpers, "Audit Helper");
+  mkdir_ok(bundle_root); mkdir_ok(bundle_contents); mkdir_ok(bundle_helpers);
   write_text_mode(workspace_interpreter, "#!/bin/sh\n", 0700);
   write_text_mode(workspace_script, "x", 0600);
+  write_text_mode(bundle_helper, "#!/bin/sh\n", 0700);
   char audit_config[4096];
   snprintf(audit_config, sizeof(audit_config),
-    "{\"version\":2,\"dryRun\":false,\"allowAppleSystemComponents\":true,\"denyPatterns\":[\"BlockedProc\"],\"trustedPublishers\":{\"PublisherProc\":{\"paths\":[\"/Applications/Publisher.app/Contents/MacOS/Publisher\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"trustedWorkspaces\":{\"WorkspaceProc\":{\"roots\":[\"%s\"],\"allowSubdirectories\":true,\"interpreters\":[\"%s\"]}},\"allowProcesses\":{\"AllowedProc\":\"/Applications/Allowed.app/Contents/MacOS/Allowed\"},\"allowRemoteHosts\":[]}\n",
-    workspace_root, workspace_interpreter);
+    "{\"version\":2,\"dryRun\":false,\"allowAppleSystemComponents\":true,\"denyPatterns\":[\"BlockedProc\"],\"trustedPublishers\":{\"PublisherProc\":{\"paths\":[\"/Applications/Publisher.app/Contents/MacOS/Publisher\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"trustedAppBundles\":{\"Audit\":{\"bundleRoot\":\"%s\",\"teamId\":\"TEAMID1234\",\"allowedSigningIdentifiers\":[\"com.example.App\"],\"allowedSigningIdentifierPrefixes\":[],\"allowSubdirectories\":true}},\"trustedWorkspaces\":{\"WorkspaceProc\":{\"roots\":[\"%s\"],\"allowSubdirectories\":true,\"interpreters\":[\"%s\"]}},\"allowProcesses\":{\"AllowedProc\":\"/Applications/Allowed.app/Contents/MacOS/Allowed\"},\"allowRemoteHosts\":[]}\n",
+    bundle_root, workspace_root, workspace_interpreter);
   write_text_mode(config, audit_config,
     0600);
 
   const char *connections[] = {
     "TrustedProc 11 user 10u IPv4 TCP 10.0.0.1:1->203.0.113.1:443 (ESTABLISHED)",
     "PublisherProc 17 user 10u IPv4 TCP 10.0.0.1:7->203.0.113.7:443 (ESTABLISHED)",
+    "BundleHelper 19 user 10u IPv4 TCP 10.0.0.1:9->203.0.113.9:443 (ESTABLISHED)",
     "WorkspaceProc 18 user 10u IPv4 TCP 10.0.0.1:8->203.0.113.8:443 (ESTABLISHED)",
     "AllowedProc 12 user 10u IPv4 TCP 10.0.0.1:2->203.0.113.2:443 (ESTABLISHED)",
     "BlockedProc 13 user 10u IPv4 TCP 10.0.0.1:3->203.0.113.3:443 (ESTABLISHED)",
@@ -2584,6 +2807,7 @@ static void test_audit_mode(void){
   const char *paths[] = {
     "/usr/libexec/trusted_audit_fixture",
     "/Applications/Publisher.app/Contents/MacOS/Publisher",
+    bundle_helper,
     workspace_interpreter,
     "/Applications/Allowed.app/Contents/MacOS/Allowed",
     "/opt/blocked",
@@ -2605,16 +2829,18 @@ static void test_audit_mode(void){
   Capture cap = capture_audit(config, 0, &platform);
   assert(cap.rc == 0);
   assert(state.collect_calls == 1);
-  assert(state.process_path_calls == 8);
+  assert(state.process_path_calls == 9);
   assert(state.wifi_calls == 0);
   assert_contains(cap.out, "Audit report");
   assert_contains(cap.out, "Runtime seconds: 0");
-  assert_contains(cap.out, "Connections scanned: 9");
-  assert_contains(cap.out, "Unique executable paths: 7");
+  assert_contains(cap.out, "Connections scanned: 10");
+  assert_contains(cap.out, "Unique executable paths: 8");
   assert_contains(cap.out, "APPLE SYSTEM");
   assert_contains(cap.out, "/usr/libexec/trusted_audit_fixture");
   assert_contains(cap.out, "TRUSTED PUBLISHER");
   assert_contains(cap.out, "/Applications/Publisher.app/Contents/MacOS/Publisher");
+  assert_contains(cap.out, "TRUSTED APP BUNDLE");
+  assert_contains(cap.out, bundle_helper);
   assert_contains(cap.out, "TRUSTED WORKSPACE");
   assert_contains(cap.out, workspace_interpreter);
   assert_contains(cap.out, "ALLOWED");
@@ -2629,14 +2855,16 @@ static void test_audit_mode(void){
   assert_contains(cap.out, "\"/opt/netwatch_unknown\"");
   assert_not_contains(cap.out, "\"TrustedProc\":");
   assert_not_contains(cap.out, "\"PublisherProc\":");
+  assert_not_contains(cap.out, "\"BundleHelper\":");
   assert_not_contains(cap.out, "\"WorkspaceProc\":");
   assert_not_contains(cap.out, "\"BlockedProc\":");
   assert_not_contains(cap.out, "\"MaybeProc\":");
   capture_free(&cap);
 
-  unlink(config); unlink(workspace_interpreter); unlink(workspace_script);
-  rmdir(workspace_root); rmdir(dir);
-  free(config); free(workspace_root); free(workspace_interpreter); free(workspace_script); free(dir);
+  unlink(config); unlink(workspace_interpreter); unlink(workspace_script); unlink(bundle_helper);
+  rmdir(workspace_root); rmdir(bundle_helpers); rmdir(bundle_contents); rmdir(bundle_root); rmdir(dir);
+  free(config); free(workspace_root); free(workspace_interpreter); free(workspace_script);
+  free(bundle_root); free(bundle_contents); free(bundle_helpers); free(bundle_helper); free(dir);
 }
 
 static void test_audit_duration(void){
@@ -3396,10 +3624,12 @@ int main(void){
   test_system_paths();
   test_policy_priority();
   test_trusted_publisher_policy();
+  test_trusted_app_bundle_policy();
   test_apple_signature_policy();
   test_temp_executable_rejected();
   test_config_bool();
   test_config_trusted_publishers();
+  test_config_trusted_app_bundles();
   test_config_trusted_workspaces();
   test_config_daemon();
   test_trusted_workspace_policy();

@@ -126,10 +126,29 @@ private struct ApplicationsView: View {
       .background(.quaternary.opacity(0.4))
       .clipShape(RoundedRectangle(cornerRadius: 8))
     }
+    sectionTitle("Configured Trusted App Bundles")
+    ForEach(viewModel.config?.appBundleItems ?? []) { item in
+      VStack(alignment: .leading, spacing: 8) {
+        HStack {
+          Text(item.name).font(.headline)
+          Spacer()
+          Button("Remove") { Task { await viewModel.removeTrustedAppBundle(name: item.name) } }
+        }
+        info("Bundle root", item.rule.bundleRoot)
+        info("Team ID", item.rule.teamId)
+        info("Signing IDs", item.rule.allowedSigningIdentifiers.joined(separator: "\n"))
+        info("Signing ID prefixes", item.rule.allowedSigningIdentifierPrefixes.joined(separator: "\n"))
+        info("Subdirectories", item.rule.allowSubdirectories ? "allowed" : "not allowed")
+      }
+      .padding(12)
+      .background(.quaternary.opacity(0.4))
+      .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
     Divider()
     sectionTitle("Discovered Applications")
-    ForEach(viewModel.filteredApps) { app in
+    ForEach(viewModel.filteredTopLevelApps) { app in
       let pathOnlyAllows = viewModel.pathOnlyAllows(for: app)
+      let helpers = viewModel.helpers(for: app)
       VStack(alignment: .leading, spacing: 8) {
         HStack {
           Text(app.displayName).font(.headline)
@@ -156,8 +175,47 @@ private struct ApplicationsView: View {
             }
             .disabled(!app.suitableTrustedPublisher)
           }
+          if let bundleName = viewModel.trustedAppBundleName(for: app) {
+            Button("Remove signed app helpers trust") {
+              Task { await viewModel.removeTrustedAppBundle(name: bundleName) }
+            }
+          } else {
+            Button("Add signed app helpers as trusted") {
+              Task { await viewModel.addTrustedAppBundle(app) }
+            }
+            .disabled(!app.suitableTrustedPublisher)
+          }
           Button("Add path-only exact") { Task { await viewModel.addPathOnlyAllowForApp(app) } }
-          Button("Add path-only app bundle") { Task { await viewModel.addPathOnlyAllowForAppBundle(app) } }
+          if !app.suitableTrustedPublisher {
+            Button("Add path-only app bundle") { Task { await viewModel.addPathOnlyAllowForAppBundle(app) } }
+          }
+        }
+        if !helpers.isEmpty {
+          DisclosureGroup("Helpers (\(helpers.count))") {
+            VStack(alignment: .leading, spacing: 10) {
+              ForEach(helpers) { helper in
+                VStack(alignment: .leading, spacing: 5) {
+                  HStack {
+                    Text(helper.displayName).font(.headline)
+                    Spacer()
+                    Text(helper.signedHelperCandidate ? "signed helper candidate" : "not suitable")
+                      .foregroundStyle(helper.signedHelperCandidate ? .green : .secondary)
+                  }
+                  info("Executable", helper.executablePath)
+                  info("Signature", helper.signatureValid ? "valid" : "invalid")
+                  info("Team ID", helper.teamId.isEmpty ? "missing" : helper.teamId)
+                  info("Signing ID", helper.signingIdentifier.isEmpty ? "missing" : helper.signingIdentifier)
+                  if viewModel.trustedAppBundleName(for: helper) != nil {
+                    Text("Inside configured trusted app bundle")
+                      .font(.caption)
+                      .foregroundStyle(.green)
+                  }
+                }
+                .padding(.vertical, 4)
+              }
+            }
+            .padding(.top, 6)
+          }
         }
         if !pathOnlyAllows.isEmpty {
           VStack(alignment: .leading, spacing: 6) {

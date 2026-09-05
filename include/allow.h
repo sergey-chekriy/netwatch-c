@@ -10,6 +10,7 @@ typedef enum {
   CONNECTION_DENIED,
   CONNECTION_ALLOWED_LOCALHOST,
   CONNECTION_ALLOWED_TRUSTED_PUBLISHER,
+  CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE,
   CONNECTION_ALLOWED_TRUSTED_WORKSPACE,
   CONNECTION_ALLOWED_CONFIG,
   CONNECTION_ALLOWED_APPLE_SYSTEM,
@@ -22,11 +23,15 @@ typedef struct {
   AppleTrustResult apple_trust;
   bool trusted_publisher_checked;
   TrustedPublisherResult trusted_publisher;
+  bool trusted_app_bundle_checked;
+  TrustedAppBundleResult trusted_app_bundle;
   bool trusted_workspace_checked;
   TrustedWorkspaceResult trusted_workspace;
   const char *matched_deny;
   const char *matched_publisher;
   const char *matched_publisher_path;
+  const char *matched_app_bundle;
+  const char *matched_bundle_root;
   const char *matched_workspace;
   const char *matched_workspace_interpreter;
   const char *expected_team_id;

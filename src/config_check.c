@@ -229,6 +229,17 @@ static int warn_trusted_publishers(const Config *cfg, const NetwatchPlatform *pl
   return 1;
 }
 
+static int warn_trusted_app_bundles(const Config *cfg, const NetwatchPlatform *platform, CheckIssues *warnings){
+  for (size_t i = 0; i < cfg->trusted_app_bundles.len; i++){
+    const TrustedAppBundleRule *rule = &cfg->trusted_app_bundles.items[i];
+    struct stat st;
+    if (platform->stat_path(platform, rule->bundle_root, &st) == 0 && S_ISDIR(st.st_mode)) continue;
+    char where[256]; snprintf(where, sizeof(where), "trustedAppBundles.%s.bundleRoot", rule->name);
+    if (!issues_push(warnings, where, "app bundle root does not currently exist: %s", rule->bundle_root)) return 0;
+  }
+  return 1;
+}
+
 static int warn_trusted_workspaces(const Config *cfg, const NetwatchPlatform *platform, CheckIssues *warnings){
   for (size_t i = 0; i < cfg->trusted_workspaces.len; i++){
     const TrustedWorkspaceRule *rule = &cfg->trusted_workspaces.items[i];
@@ -282,6 +293,7 @@ static int collect_warnings(cJSON *root, const Config *cfg, const NetwatchPlatfo
     && warn_allow_paths(allow, cfg, platform, verifier, warnings)
     && warn_duplicate_trusted_publisher_paths(cfg, warnings)
     && warn_trusted_publishers(cfg, platform, warnings)
+    && warn_trusted_app_bundles(cfg, platform, warnings)
     && warn_trusted_workspaces(cfg, platform, warnings)
     && warn_shadowed_by_deny(root, warnings);
 }

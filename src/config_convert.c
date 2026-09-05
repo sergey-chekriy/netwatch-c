@@ -100,6 +100,7 @@ static int top_level_key_rank(const char *key){
     "daemon",
     "allowAppleSystemComponents",
     "trustedPublishers",
+    "trustedAppBundles",
     "trustedWorkspaces",
     "interface",
     "logPath",

@@ -67,6 +67,7 @@ static void print_config_status(const char *cfg_path, const NetwatchPlatform *pl
     printf("Config version: unavailable\n");
     printf("Apple system trust: unavailable\n");
     printf("Trusted publisher rules: unavailable\n");
+    printf("Trusted app bundle rules: unavailable\n");
     printf("Trusted workspace rules: unavailable\n");
     printf("Dry run: unavailable\n");
     return;
@@ -79,6 +80,7 @@ static void print_config_status(const char *cfg_path, const NetwatchPlatform *pl
     printf("Config version: unavailable\n");
     printf("Apple system trust: unavailable\n");
     printf("Trusted publisher rules: unavailable\n");
+    printf("Trusted app bundle rules: unavailable\n");
     printf("Trusted workspace rules: unavailable\n");
     printf("Dry run: unavailable\n");
     free(text); return;
@@ -90,6 +92,7 @@ static void print_config_status(const char *cfg_path, const NetwatchPlatform *pl
   printf("Config version: %s\n", version ? "2" : "2 (implicit)");
   printf("Apple system trust: %s\n", enabled_disabled(cfg.allow_apple_system_components));
   printf("Trusted publisher rules: %zu\n", cfg.trusted_publishers.len);
+  printf("Trusted app bundle rules: %zu\n", cfg.trusted_app_bundles.len);
   printf("Trusted workspace rules: %zu\n", cfg.trusted_workspaces.len);
   printf("Dry run: %s\n", enabled_disabled(cfg.dry_run));
   cJSON_Delete(root);

@@ -55,6 +55,20 @@ static ConnectionPolicy publisher_policy_result(TrustedPublisherCheck check){
   return policy;
 }
 
+static ConnectionPolicy app_bundle_policy_result(TrustedAppBundleCheck check){
+  ConnectionPolicy policy = policy_result(check.result == TRUSTED_APP_BUNDLE_OK
+    ? CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE
+    : CONNECTION_UNKNOWN);
+  policy.trusted_app_bundle_checked = true;
+  policy.trusted_app_bundle = check.result;
+  policy.matched_app_bundle = check.rule ? check.rule->name : NULL;
+  policy.matched_bundle_root = check.rule ? check.rule->bundle_root : NULL;
+  policy.expected_team_id = check.rule ? check.rule->team_id : NULL;
+  snprintf(policy.actual_team_id, sizeof(policy.actual_team_id), "%s", check.actual.team_id);
+  snprintf(policy.actual_signing_identifier, sizeof(policy.actual_signing_identifier), "%s", check.actual.signing_identifier);
+  return policy;
+}
+
 static ConnectionPolicy workspace_policy_result(TrustedWorkspaceCheck check){
   ConnectionPolicy policy = policy_result(check.result == TRUSTED_WORKSPACE_OK
     ? CONNECTION_ALLOWED_TRUSTED_WORKSPACE
@@ -75,6 +89,9 @@ static ConnectionPolicy connection_policy_for_path_base(const char *line, const 
 
   TrustedPublisherCheck publisher = trusted_publisher_check_path(&cfg->trusted_publishers, path, platform);
   if (publisher.result != TRUSTED_PUBLISHER_PATH_NOT_MATCHED) return publisher_policy_result(publisher);
+
+  TrustedAppBundleCheck app_bundle = trusted_app_bundle_check_path(&cfg->trusted_app_bundles, path, platform);
+  if (app_bundle.result != TRUSTED_APP_BUNDLE_PATH_NOT_MATCHED) return app_bundle_policy_result(app_bundle);
 
   TrustedWorkspaceCheck workspace = trusted_workspace_check_path(&cfg->trusted_workspaces, pid, path, platform);
   if (workspace.result != TRUSTED_WORKSPACE_INTERPRETER_NOT_MATCHED) return workspace_policy_result(workspace);
@@ -131,6 +148,7 @@ ConnectionPolicy connection_policy(const char *line, const Config *cfg, PathCach
 int connection_decision_allowed(ConnectionDecision decision){
   return decision == CONNECTION_ALLOWED_LOCALHOST
     || decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER
+    || decision == CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE
     || decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE
     || decision == CONNECTION_ALLOWED_CONFIG
     || decision == CONNECTION_ALLOWED_APPLE_SYSTEM;
@@ -145,6 +163,7 @@ const char *connection_decision_name(ConnectionDecision decision){
     case CONNECTION_DENIED: return "DENIED";
     case CONNECTION_ALLOWED_LOCALHOST: return "ALLOWED_LOCALHOST";
     case CONNECTION_ALLOWED_TRUSTED_PUBLISHER: return "TRUSTED_PUBLISHER";
+    case CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE: return "TRUSTED_APP_BUNDLE";
     case CONNECTION_ALLOWED_TRUSTED_WORKSPACE: return "TRUSTED_WORKSPACE";
     case CONNECTION_ALLOWED_CONFIG: return "ALLOWED_CONFIG";
     case CONNECTION_ALLOWED_APPLE_SYSTEM: return "APPLE_SYSTEM";
@@ -158,6 +177,7 @@ const char *connection_decision_reason(ConnectionDecision decision){
     case CONNECTION_DENIED: return "explicit deny rule";
     case CONNECTION_ALLOWED_LOCALHOST: return "localhost listen";
     case CONNECTION_ALLOWED_TRUSTED_PUBLISHER: return "trusted publisher identity verified";
+    case CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE: return "trusted app bundle identity verified";
     case CONNECTION_ALLOWED_TRUSTED_WORKSPACE: return "trusted workspace script verified";
     case CONNECTION_ALLOWED_CONFIG: return "explicit config allow";
     case CONNECTION_ALLOWED_APPLE_SYSTEM: return "trusted Apple system component";
@@ -189,10 +209,14 @@ char *describe_connection_with_platform(const char *line, PathCache *cache, Conn
   const char *decision = connection_decision_name(policy.decision);
   const char *reason = connection_decision_reason(policy.decision);
   if (policy.trusted_publisher_checked && policy.decision == CONNECTION_UNKNOWN) reason = trusted_publisher_result_name(policy.trusted_publisher);
+  if (policy.trusted_app_bundle_checked && policy.decision == CONNECTION_UNKNOWN) reason = trusted_app_bundle_result_name(policy.trusted_app_bundle);
   if (policy.trusted_workspace_checked && policy.decision == CONNECTION_UNKNOWN) reason = trusted_workspace_result_name(policy.trusted_workspace);
   const char *apple = policy.apple_trust_checked ? apple_trust_result_name(policy.apple_trust) : "";
   const char *publisher = policy.matched_publisher ? policy.matched_publisher : "";
   const char *publisher_result = policy.trusted_publisher_checked ? trusted_publisher_result_name(policy.trusted_publisher) : "";
+  const char *app_bundle = policy.matched_app_bundle ? policy.matched_app_bundle : "";
+  const char *bundle_root = policy.matched_bundle_root ? policy.matched_bundle_root : "";
+  const char *app_bundle_result = policy.trusted_app_bundle_checked ? trusted_app_bundle_result_name(policy.trusted_app_bundle) : "";
   const char *workspace = policy.matched_workspace ? policy.matched_workspace : "";
   const char *workspace_result = policy.trusted_workspace_checked ? trusted_workspace_result_name(policy.trusted_workspace) : "";
 
@@ -214,7 +238,8 @@ char *describe_connection_with_platform(const char *line, PathCache *cache, Conn
   }
 
   size_t n = strlen(decision) + strlen(name) + strlen(line) + strlen(path) + strlen(reason) + strlen(apple)
-    + strlen(publisher) + strlen(publisher_result) + strlen(policy.actual_team_id)
+    + strlen(publisher) + strlen(publisher_result) + strlen(app_bundle) + strlen(bundle_root)
+    + strlen(app_bundle_result) + strlen(policy.actual_team_id)
     + strlen(policy.actual_signing_identifier) + strlen(workspace) + strlen(workspace_result)
     + strlen(policy.matched_workspace_root) + strlen(policy.trusted_workspace_cwd)
     + strlen(policy.trusted_workspace_script) + strlen(pid_text) + strlen(ppid_text)
@@ -222,11 +247,14 @@ char *describe_connection_with_platform(const char *line, PathCache *cache, Conn
     + strlen(parent_command ? parent_command : "") + 520;
   char *out = malloc(n);
   if (out){
-    snprintf(out, n, "[%s] %s\n  LINE: %s\n  PATH: %s\n  REASON: %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+    snprintf(out, n, "[%s] %s\n  LINE: %s\n  PATH: %s\n  REASON: %s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
       decision, name, line, path, reason,
       policy.apple_trust_checked ? "\n  APPLE TRUST: " : "", apple,
       policy.trusted_publisher_checked ? "\n  TRUSTED PUBLISHER: " : "", publisher_result,
       policy.matched_publisher ? "\n  PUBLISHER RULE: " : "", publisher,
+      policy.trusted_app_bundle_checked ? "\n  TRUSTED APP BUNDLE: " : "", app_bundle_result,
+      policy.matched_app_bundle ? "\n  APP BUNDLE RULE: " : "", app_bundle,
+      policy.matched_bundle_root ? "\n  BUNDLE ROOT: " : "", bundle_root,
       policy.actual_team_id[0] ? "\n  ACTUAL TEAM ID: " : "", policy.actual_team_id,
       policy.actual_signing_identifier[0] ? "\n  ACTUAL SIGNING IDENTIFIER: " : "", policy.actual_signing_identifier,
       policy.trusted_workspace_checked ? "\n  TRUSTED WORKSPACE: " : "", workspace_result,

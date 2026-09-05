@@ -33,12 +33,14 @@ public struct DiscoveredApp: Decodable, Equatable, Identifiable {
   public var id: String { executablePath }
   public let displayName: String
   public let bundlePath: String
+  public let parentBundlePath: String?
   public let executablePath: String
   public let signingIdentifier: String
   public let teamId: String
   public let signatureValid: Bool
   public let appleSigned: Bool
   public let suitableTrustedPublisher: Bool
+  public let signedHelperCandidate: Bool
 }
 
 public struct ConfigSummary: Decodable, Equatable {
@@ -52,6 +54,7 @@ public struct ConfigSummary: Decodable, Equatable {
   public let denyPatterns: [String]?
   public let allowRemoteHosts: [String]?
   public let trustedPublishers: [String: TrustedPublisherRule]?
+  public let trustedAppBundles: [String: TrustedAppBundleRule]?
   public let trustedWorkspaces: [String: TrustedWorkspaceRule]?
   public let allowProcesses: [String: AllowProcessRule]?
 
@@ -62,6 +65,11 @@ public struct ConfigSummary: Decodable, Equatable {
 
   public var workspaceItems: [TrustedWorkspaceItem] {
     (trustedWorkspaces ?? [:]).map { TrustedWorkspaceItem(name: $0.key, rule: $0.value) }
+      .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+  }
+
+  public var appBundleItems: [TrustedAppBundleItem] {
+    (trustedAppBundles ?? [:]).map { TrustedAppBundleItem(name: $0.key, rule: $0.value) }
       .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
   }
 
@@ -87,6 +95,14 @@ public struct TrustedPublisherRule: Decodable, Equatable {
     self.teamId = teamId
     self.signingIdentifier = signingIdentifier
   }
+}
+
+public struct TrustedAppBundleRule: Decodable, Equatable {
+  public let bundleRoot: String
+  public let teamId: String
+  public let allowedSigningIdentifiers: [String]
+  public let allowedSigningIdentifierPrefixes: [String]
+  public let allowSubdirectories: Bool
 }
 
 public struct TrustedWorkspaceRule: Decodable, Equatable {
@@ -120,6 +136,12 @@ public struct TrustedPublisherItem: Identifiable, Equatable {
   public var id: String { name }
   public let name: String
   public let rule: TrustedPublisherRule
+}
+
+public struct TrustedAppBundleItem: Identifiable, Equatable {
+  public var id: String { name }
+  public let name: String
+  public let rule: TrustedAppBundleRule
 }
 
 public struct TrustedWorkspaceItem: Identifiable, Equatable {

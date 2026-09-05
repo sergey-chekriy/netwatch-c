@@ -639,6 +639,109 @@ int config_backend_remove_trusted_publisher(const char *config_path, const char 
 
 typedef struct {
   const char *name;
+  const char *bundle_root;
+  const char *team_id;
+  const char **identifiers;
+  size_t identifier_count;
+  const char **prefixes;
+  size_t prefix_count;
+  int allow_subdirectories;
+} AppBundleEdit;
+
+static int valid_app_bundle_root(const char *path){
+  size_t n = path ? strlen(path) : 0;
+  return n >= 5 && path[0] == '/' && !strchr(path, '*') && !strcmp(path + n - 4, ".app");
+}
+
+static int validate_identity_values(const char **values, size_t count, const char *label,
+  char *err, size_t err_len){
+  for (size_t i = 0; i < count; i++){
+    if (!values || !values[i] || !values[i][0] || strchr(values[i], '*')){
+      set_error(err, err_len, "%s must contain non-empty values without wildcards", label);
+      return 0;
+    }
+    for (size_t j = i + 1; j < count; j++){
+      if (!strcmp(values[i], values[j])){
+        set_error(err, err_len, "%s contains a duplicate value", label);
+        return 0;
+      }
+    }
+  }
+  return 1;
+}
+
+static int validate_app_bundle_inputs(const AppBundleEdit *edit, const NetwatchPlatform *platform,
+  char *err, size_t err_len){
+  if (!edit->name || !edit->name[0]) return set_error(err, err_len, "trusted app bundle name is required"), 0;
+  if (!valid_app_bundle_root(edit->bundle_root)){
+    return set_error(err, err_len, "bundle root must be an exact absolute .app path"), 0;
+  }
+  struct stat st;
+  if (platform->stat_path(platform, edit->bundle_root, &st) != 0 || !S_ISDIR(st.st_mode)){
+    return set_error(err, err_len, "bundle root must exist and be a directory"), 0;
+  }
+  if (!edit->team_id || !edit->team_id[0]) return set_error(err, err_len, "team ID is required"), 0;
+  if (!edit->identifier_count && !edit->prefix_count){
+    return set_error(err, err_len, "at least one signing identifier or prefix is required"), 0;
+  }
+  if (!validate_identity_values(edit->identifiers, edit->identifier_count, "allowed signing identifiers", err, err_len)
+    || !validate_identity_values(edit->prefixes, edit->prefix_count, "allowed signing identifier prefixes", err, err_len)) return 0;
+  CodeSignatureIdentity actual = {0};
+  CodeSignatureIdentityResult result = platform->code_signature_identity(
+    platform, edit->bundle_root, &actual, err, err_len);
+  if (result != CODE_SIGNATURE_IDENTITY_OK){
+    if (!err || !err[0]) set_error(err, err_len, "app bundle signature is invalid or unavailable");
+    return 0;
+  }
+  if (strcmp(actual.team_id, edit->team_id)) return set_error(err, err_len, "trusted app bundle Team ID mismatch"), 0;
+  return 1;
+}
+
+static int edit_add_app_bundle(cJSON *root, void *ctx, char *changed, size_t changed_len,
+  char *err, size_t err_len){
+  AppBundleEdit *edit = ctx;
+  cJSON *bundles = json_ensure_object(root, "trustedAppBundles");
+  cJSON *rule = json_object(edit->name);
+  if (!bundles || !rule
+    || !json_set(rule, "bundleRoot", json_string("bundleRoot", edit->bundle_root))
+    || !json_set(rule, "teamId", json_string("teamId", edit->team_id))
+    || !json_set(rule, "allowedSigningIdentifiers", json_string_array(
+      "allowedSigningIdentifiers", edit->identifiers, edit->identifier_count))
+    || !json_set(rule, "allowedSigningIdentifierPrefixes", json_string_array(
+      "allowedSigningIdentifierPrefixes", edit->prefixes, edit->prefix_count))
+    || !json_set(rule, "allowSubdirectories", json_bool("allowSubdirectories", edit->allow_subdirectories))){
+    cJSON_Delete(rule); set_error(err, err_len, "out of memory adding trusted app bundle"); return 0;
+  }
+  if (!json_set(bundles, edit->name, rule)){
+    cJSON_Delete(rule); set_error(err, err_len, "out of memory adding trusted app bundle"); return 0;
+  }
+  snprintf(changed, changed_len, "trustedAppBundles.%s added", edit->name);
+  return 1;
+}
+
+int config_backend_add_trusted_app_bundle(const char *config_path, const char *name,
+  const char *bundle_root, const char *team_id, const char **identifiers, size_t identifier_count,
+  const char **prefixes, size_t prefix_count, int allow_subdirectories,
+  const NetwatchPlatform *platform){
+  platform = netwatch_platform_or_default(platform);
+  AppBundleEdit edit = {
+    name, bundle_root, team_id, identifiers, identifier_count, prefixes, prefix_count,
+    allow_subdirectories ? 1 : 0
+  };
+  char err[512] = {0};
+  if (!validate_app_bundle_inputs(&edit, platform, err, sizeof(err))) return fail_msg(err);
+  return edit_config(config_path, edit_add_app_bundle, &edit, platform);
+}
+
+int config_backend_remove_trusted_app_bundle(const char *config_path, const char *name,
+  const NetwatchPlatform *platform){
+  if (!name || !*name) return fail_msg("trusted app bundle name is required");
+  RemoveEdit edit = { .section = "trustedAppBundles", .name = name };
+  return edit_config(config_path, edit_remove_named, &edit, platform);
+}
+
+typedef struct {
+  const char *name;
   const char **roots;
   size_t root_count;
   const char **interpreters;

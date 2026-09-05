@@ -21,6 +21,11 @@ int config_backend_remove_allow_process(const char *config_path, const char *nam
 int config_backend_add_trusted_publisher(const char *config_path, const char *name, const char *path, const char *team_id, const char *signing_identifier, const NetwatchPlatform *platform);
 int config_backend_set_trusted_publisher(const char *config_path, const char *old_name, const char *new_name, const char **paths, size_t path_count, const char *team_id, const char *signing_identifier, const NetwatchPlatform *platform);
 int config_backend_remove_trusted_publisher(const char *config_path, const char *name, const NetwatchPlatform *platform);
+int config_backend_add_trusted_app_bundle(const char *config_path, const char *name, const char *bundle_root,
+  const char *team_id, const char **identifiers, size_t identifier_count, const char **prefixes,
+  size_t prefix_count, int allow_subdirectories, const NetwatchPlatform *platform);
+int config_backend_remove_trusted_app_bundle(const char *config_path, const char *name,
+  const NetwatchPlatform *platform);
 int config_backend_add_trusted_workspace(const char *config_path, const char *name, const char *root, const char *interpreter, const NetwatchPlatform *platform);
 int config_backend_set_trusted_workspace(const char *config_path, const char *old_name, const char *new_name, const char **roots, size_t root_count, const char **interpreters, size_t interpreter_count, int allow_subdirectories, int allow_by_cwd_only, const NetwatchPlatform *platform);
 int config_backend_remove_trusted_workspace(const char *config_path, const char *name, const NetwatchPlatform *platform);

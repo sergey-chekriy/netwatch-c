@@ -112,7 +112,7 @@ Applications uses:
 netwatch --discover-apps --json
 ```
 
-It displays installed `.app` bundles and nested app extensions from `Contents/PlugIns/*.appex` with display name, bundle path, executable path, signature status, Team ID, signing identifier, Apple-signed flag, and whether the item is suitable for `trustedPublishers`.
+It displays installed `.app` bundles and signed helpers from standard Frameworks, Helpers, XPCServices, PlugIns, LoginItems, direct executables in `Contents/Resources`, and `Resources/native` locations. Helpers are grouped under their parent `.app` where practical and show executable path, signature status, Team ID, signing identifier, and a `signed helper candidate` marker.
 
 Adding or editing a trusted publisher is always an explicit user action and calls backend commands such as:
 
@@ -131,9 +131,13 @@ netwatch --config-set-trusted-publisher "<old-name>" \
   --config /path/to/netwatch.config.json
 ```
 
-The app never auto-trusts all discovered apps and never invents Team IDs or signing identifiers. Configured trusted publisher rules can be renamed, edited, or removed from the Applications screen.
+The app never auto-trusts discovered apps or helpers and never invents Team IDs or signing identifiers. Configured trusted publisher rules can be renamed, edited, or removed from the Applications screen.
 
-The Applications screen also shows matching path-only `allowProcesses` rules and can remove them. It can add either the exact executable path or an app-bundle wildcard such as `/Applications/Opera.app/Contents/*`. Use the wildcard for apps whose helper processes also need to be covered. Path-only allows are legacy/manual rules and are weaker than trusted publisher verification.
+`Add signed app helpers as trusted` is an explicit action that creates `trustedAppBundles` through the backend. It binds the parent `.app` root to its exact Team ID, records the main and discovered same-team signing identifiers, adds the main signing identifier prefix, and enables subdirectories. The runtime still verifies every helper path and signature independently.
+
+Configured trusted app bundle rules are shown separately and can be removed. A signed app uses this action as the default helper recommendation; the weaker path-only app bundle action is shown only when signed identity is unavailable.
+
+The Applications screen also shows matching path-only `allowProcesses` rules and can remove them. Path-only allows remain a separate legacy/manual mechanism and are weaker than trusted publisher or trusted app bundle verification because they do not check signed identity.
 
 For WhatsApp notification traffic, add the discovered `WhatsApp - ServiceExtension` item as a trusted publisher. Its executable is inside `/Applications/WhatsApp.app/Contents/PlugIns/ServiceExtension.appex`.
 
@@ -156,7 +160,7 @@ netwatch --config-remove-allow-process "<name>" \
   --config /path/to/netwatch.config.json
 ```
 
-Use this for explicit path-only exceptions such as local tools, `/usr/bin/ssh`, `/usr/bin/scp`, optional app helpers, or apps that do not currently provide trusted publisher metadata on this machine. Prefer `trustedPublishers` for signed third-party apps when exact executable identity is known.
+Use this for explicit path-only exceptions such as local tools, `/usr/bin/ssh`, `/usr/bin/scp`, or apps without usable signed identity. Prefer `trustedPublishers` for one exact signed executable and `trustedAppBundles` for signed helpers below a selected `.app` root.
 
 ## Workspaces
 

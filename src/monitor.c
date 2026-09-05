@@ -49,6 +49,7 @@ static void stats_count_policy(MonitorStats *stats, ConnectionPolicy policy){
   if (!stats) return;
   if (policy.decision == CONNECTION_ALLOWED_APPLE_SYSTEM) stats->apple_trusted_decisions++;
   else if (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER) stats->trusted_publisher_matches++;
+  else if (policy.decision == CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE) stats->trusted_app_bundle_matches++;
   else if (policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE) stats->trusted_workspace_matches++;
   else if (policy.decision == CONNECTION_ALLOWED_CONFIG) stats->explicit_allow_matches++;
   else if (policy.decision == CONNECTION_DENIED) stats->deny_matches++;
@@ -77,6 +78,7 @@ static void set_scan_result(MonitorScanOutcome *outcome, const char *result, con
 
 static const char *policy_reason(ConnectionPolicy policy){
   if (policy.trusted_publisher_checked && policy.decision == CONNECTION_UNKNOWN) return trusted_publisher_result_name(policy.trusted_publisher);
+  if (policy.trusted_app_bundle_checked && policy.decision == CONNECTION_UNKNOWN) return trusted_app_bundle_result_name(policy.trusted_app_bundle);
   if (policy.trusted_workspace_checked && policy.decision == CONNECTION_UNKNOWN) return trusted_workspace_result_name(policy.trusted_workspace);
   return connection_decision_reason(policy.decision);
 }
@@ -116,6 +118,7 @@ void monitor_stats_print(const MonitorStats *stats){
   printf("Unique executable paths: %zu\n", stats->unique_executable_paths);
   printf("Apple-trusted decisions: %zu\n", stats->apple_trusted_decisions);
   printf("Trusted publisher matches: %zu\n", stats->trusted_publisher_matches);
+  printf("Trusted app bundle matches: %zu\n", stats->trusted_app_bundle_matches);
   printf("Trusted workspace matches: %zu\n", stats->trusted_workspace_matches);
   printf("Trusted publisher invalid signatures: %zu\n", stats->trusted_publisher_invalid_signatures);
   printf("Trusted publisher Team ID mismatches: %zu\n", stats->trusted_publisher_team_id_mismatches);
@@ -168,7 +171,9 @@ int monitor_scan_config_with_outcome(const Config *cfg, MonitorStats *stats, Mon
       fill_unknown_summary(&outcome->last_unknown, connections.items[i], proc_copy, pid, path_for_summary, policy, cfg, platform);
     }
     free(path_for_summary);
-    if (cfg->verbose_log && (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER || policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE)){
+    if (cfg->verbose_log && (policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER
+      || policy.decision == CONNECTION_ALLOWED_TRUSTED_APP_BUNDLE
+      || policy.decision == CONNECTION_ALLOWED_TRUSTED_WORKSPACE)){
       log_trusted_publisher_success(cfg, connections.items[i], &cache, policy, platform);
     }
     if (connection_decision_allowed(policy.decision)) continue;
