@@ -113,8 +113,8 @@ static int parse_required_nonempty_string(cJSON *json, const char *where, const 
 static int parse_trusted_publisher_paths(cJSON *json, StrList *out, const char *publisher, char *err, size_t err_len){
   char where[256];
   snprintf(where, sizeof(where), "trustedPublishers.%s.paths", publisher);
-  if (!cJSON_IsArray(json)){ set_error(err, err_len, "%s expected non-empty array of exact executable paths", where); return 0; }
-  if (cJSON_GetArraySize(json) <= 0){ set_error(err, err_len, "%s expected non-empty array of exact executable paths", where); return 0; }
+  if (!cJSON_IsArray(json)){ set_error(err, err_len, "%s expected non-empty array of executable paths", where); return 0; }
+  if (cJSON_GetArraySize(json) <= 0){ set_error(err, err_len, "%s expected non-empty array of executable paths", where); return 0; }
 
   int index = 0;
   cJSON *path = NULL;
@@ -128,8 +128,10 @@ static int parse_trusted_publisher_paths(cJSON *json, StrList *out, const char *
       set_error(err, err_len, "%s expected absolute executable path", where);
       return 0;
     }
-    if (strchr(path->valuestring, '*')){
-      set_error(err, err_len, "%s wildcard paths are not supported for trusted publisher rules", where);
+    const char *star = strchr(path->valuestring, '*');
+    size_t path_len = strlen(path->valuestring);
+    if (star && (path_len < 3 || star != path->valuestring + path_len - 1 || star[-1] != '/')){
+      set_error(err, err_len, "%s wildcard is supported only as a final /* directory prefix", where);
       return 0;
     }
     if (!strlist_push(out, path->valuestring)){

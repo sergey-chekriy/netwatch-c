@@ -131,7 +131,7 @@ netwatch --config-set-trusted-publisher "<old-name>" \
   --config /path/to/netwatch.config.json
 ```
 
-The app never auto-trusts discovered apps or helpers and never invents Team IDs or signing identifiers. Configured trusted publisher rules can be renamed, edited, or removed from the Applications screen.
+The app never auto-trusts discovered apps or helpers and never invents Team IDs or signing identifiers. Configured trusted publisher rules can be renamed, edited, or removed from the Applications screen. Publisher paths may end in `/*` for signed executables below a versioned directory; signature, Team ID, and signing identifier checks still apply to every matched executable.
 
 `Add signed app helpers as trusted` is an explicit action that creates `trustedAppBundles` through the backend. It binds the parent `.app` root to its exact Team ID, records the main and discovered same-team signing identifiers, adds the main signing identifier prefix, and enables subdirectories. The runtime still verifies every helper path and signature independently.
 
@@ -160,7 +160,7 @@ netwatch --config-remove-allow-process "<name>" \
   --config /path/to/netwatch.config.json
 ```
 
-Use this for explicit path-only exceptions such as local tools, `/usr/bin/ssh`, `/usr/bin/scp`, or apps without usable signed identity. Prefer `trustedPublishers` for one exact signed executable and `trustedAppBundles` for signed helpers below a selected `.app` root.
+Use this for explicit path-only exceptions such as local tools, `/usr/bin/ssh`, `/usr/bin/scp`, or apps without usable signed identity. Prefer `trustedPublishers` for signed executables and versioned signed directories, and `trustedAppBundles` for signed helpers below a selected `.app` root.
 
 ## Workspaces
 

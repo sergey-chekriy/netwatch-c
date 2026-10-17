@@ -66,7 +66,11 @@ public final class ConfiguratorViewModel: ObservableObject {
 
   public func trustedPublisherName(for app: DiscoveredApp) -> String? {
     if config?.trustedPublishers?[app.displayName] != nil { return app.displayName }
-    return config?.publisherItems.first { $0.rule.paths.contains(app.executablePath) }?.name
+    return config?.publisherItems.first {
+      $0.rule.paths.contains { path in
+        path == app.executablePath || (path.hasSuffix("/*") && app.executablePath.hasPrefix(String(path.dropLast())))
+      }
+    }?.name
   }
 
   public func trustedAppBundleName(for app: DiscoveredApp) -> String? {

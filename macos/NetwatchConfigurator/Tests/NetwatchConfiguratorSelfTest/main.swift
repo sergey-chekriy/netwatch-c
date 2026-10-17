@@ -47,6 +47,7 @@ struct NetwatchConfiguratorSelfTest {
     try await allowProcessCommands()
     try await workspaceCommands()
     try workspaceFormValidation()
+    try trustedPublisherFormValidation()
     try allowProcessFormValidation()
     try allowProcessEditFormValidation()
     try configPathWritableBehavior()
@@ -147,12 +148,16 @@ struct NetwatchConfiguratorSelfTest {
   @MainActor private static func trustedPublisherLookupUsesExecutablePath() throws {
     let viewModel = ConfiguratorViewModel(service: NetwatchService(binaryPath: "/tmp/netwatch", runner: FakeRunner([])))
     viewModel.config = try JSONDecoder().decode(ConfigSummary.self, from: Data(#"""
-    {"trustedPublishers":{"\u200eWhatsApp":{"paths":["/Applications/WhatsApp.app/Contents/MacOS/WhatsApp"],"teamId":"57T9237FN3","signingIdentifier":"net.whatsapp.WhatsApp"}}}
+    {"trustedPublishers":{"\u200eWhatsApp":{"paths":["/Applications/WhatsApp.app/Contents/MacOS/WhatsApp"],"teamId":"57T9237FN3","signingIdentifier":"net.whatsapp.WhatsApp"},"Codex":{"paths":["/Users/test/.codex/releases/*"],"teamId":"TEAM","signingIdentifier":"codex"}}}
     """#.utf8))
     let app = try JSONDecoder().decode(DiscoveredApp.self, from: Data("""
     {"displayName":"WhatsApp","bundlePath":"/Applications/WhatsApp.app","parentBundlePath":null,"executablePath":"/Applications/WhatsApp.app/Contents/MacOS/WhatsApp","signingIdentifier":"net.whatsapp.WhatsApp","teamId":"57T9237FN3","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true,"signedHelperCandidate":false}
     """.utf8))
     try expect(viewModel.trustedPublisherName(for: app) == "\u{200E}WhatsApp", "trusted publisher path lookup")
+    let codex = try JSONDecoder().decode(DiscoveredApp.self, from: Data("""
+    {"displayName":"codex","bundlePath":"/Users/test/.codex/releases/1.0","parentBundlePath":null,"executablePath":"/Users/test/.codex/releases/1.0/bin/codex","signingIdentifier":"codex","teamId":"TEAM","signatureValid":true,"appleSigned":false,"suitableTrustedPublisher":true,"signedHelperCandidate":false}
+    """.utf8))
+    try expect(viewModel.trustedPublisherName(for: codex) == "Codex", "trusted publisher prefix lookup")
   }
 
   @MainActor private static func configuratorDisplaysSignedHelperCandidate() throws {
@@ -334,6 +339,18 @@ struct NetwatchConfiguratorSelfTest {
     try expect(AllowProcessForm(name: "App", path: "/Applications/App.app/Contents/*").validationError() == nil, "allow form wildcard")
     try expect(AllowProcessForm(name: "", path: "/usr/bin/ssh").validationError() == "Allow rule name is required.", "allow form name required")
     try expect(AllowProcessForm(name: "bad", path: "/Applications/*/bad").validationError() == "Wildcard is supported only as a final *.", "allow form wildcard final")
+  }
+
+  private static func trustedPublisherFormValidation() throws {
+    var form = TrustedPublisherEditForm()
+    form.originalName = "Codex"
+    form.name = "Codex"
+    form.teamId = "TEAM"
+    form.signingIdentifier = "codex"
+    form.pathsText = "/Users/test/.codex/packages/app-server-daemon/releases/*"
+    try expect(form.validationError() == nil, "publisher directory prefix valid")
+    form.pathsText = "/Users/test/.codex/*/codex"
+    try expect(form.validationError() == "Publisher wildcard is supported only as a final /* directory prefix.", "publisher embedded wildcard invalid")
   }
 
   private static func allowProcessEditFormValidation() throws {

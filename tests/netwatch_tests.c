@@ -872,6 +872,51 @@ static void test_trusted_publisher_policy(void){
   config_free(&cfg);
 }
 
+static void test_trusted_publisher_prefix_policy(void){
+  char *dir = temp_dir();
+  char *releases = join_path_dup(dir, "releases");
+  char *version = join_path_dup(releases, "0.163.0");
+  char *bin = join_path_dup(version, "bin");
+  char *codex = join_path_dup(bin, "codex");
+  char *outside = join_path_dup(dir, "outside");
+  char *escape = join_path_dup(releases, "escape");
+  mkdir_ok(releases); mkdir_ok(version); mkdir_ok(bin);
+  write_text_mode(codex, "codex", 0700);
+  write_text_mode(outside, "outside", 0700);
+  assert(symlink(outside, escape) == 0);
+
+  char text[4096];
+  snprintf(text, sizeof(text),
+    "{\"version\":2,\"trustedPublishers\":{\"Codex\":{"
+    "\"paths\":[\"%s/*\"],\"teamId\":\"2DC432GLL2\",\"signingIdentifier\":\"codex\"}}}\n",
+    releases);
+  Config cfg = parse_config_ok(text);
+  const char *line = "codex 123 user TCP 1->2 (ESTABLISHED)";
+  FakePlatformState state = { .team_id = "2DC432GLL2", .signing_identifier = "codex" };
+  NetwatchPlatform platform = fake_platform(&state);
+  ConnectionPolicy policy = connection_policy_for_path_with_platform(line, "codex", codex, &cfg, &platform);
+  assert(policy.decision == CONNECTION_ALLOWED_TRUSTED_PUBLISHER);
+  assert(!strcmp(policy.matched_publisher_path, cfg.trusted_publishers.items[0].paths.items[0]));
+
+  state = (FakePlatformState){ .team_id = "2DC432GLL2", .signing_identifier = "codex" };
+  platform = fake_platform(&state);
+  policy = connection_policy_for_path_with_platform(line, "codex", outside, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(!policy.trusted_publisher_checked);
+  assert(state.identity_calls == 0);
+
+  policy = connection_policy_for_path_with_platform(line, "codex", escape, &cfg, &platform);
+  assert(policy.decision == CONNECTION_UNKNOWN);
+  assert(policy.trusted_publisher_checked);
+  assert(policy.trusted_publisher == TRUSTED_PUBLISHER_SECURITY_ERROR);
+  assert(state.identity_calls == 0);
+
+  config_free(&cfg);
+  unlink(escape); unlink(codex); unlink(outside);
+  rmdir(bin); rmdir(version); rmdir(releases); rmdir(dir);
+  free(releases); free(version); free(bin); free(codex); free(outside); free(escape); free(dir);
+}
+
 static void test_trusted_app_bundle_policy(void){
   char *dir = temp_dir();
   char *bundle = join_path_dup(dir, "ChatGPT.app");
@@ -1123,7 +1168,7 @@ static void test_config_trusted_publishers(void){
     "  \"version\": 2,\n"
     "  \"trustedPublishers\": {\n"
     "    \"Google Chrome\": {\n"
-    "      \"paths\": [\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\"],\n"
+    "      \"paths\": [\"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\", \"/Applications/Google Chrome.app/Contents/Frameworks/*\"],\n"
     "      \"teamId\": \"EQHXZ8M8AV\",\n"
     "      \"signingIdentifier\": \"com.google.Chrome\"\n"
     "    },\n"
@@ -1138,6 +1183,7 @@ static void test_config_trusted_publishers(void){
   assert(cfg.trusted_publishers.len == 2);
   assert(!strcmp(cfg.trusted_publishers.items[0].name, "Google Chrome"));
   assert(!strcmp(cfg.trusted_publishers.items[0].paths.items[0], "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"));
+  assert(!strcmp(cfg.trusted_publishers.items[0].paths.items[1], "/Applications/Google Chrome.app/Contents/Frameworks/*"));
   assert(!strcmp(cfg.trusted_publishers.items[0].team_id, "EQHXZ8M8AV"));
   assert(!strcmp(cfg.trusted_publishers.items[0].signing_identifier, "com.google.Chrome"));
   assert(cfg.trusted_publishers.items[0].require_valid_signature);
@@ -1148,7 +1194,8 @@ static void test_config_trusted_publishers(void){
   assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[],\"teamId\":\"T\",\"signingIdentifier\":\"id\"}}}\n", "trustedPublishers.App.paths expected non-empty array");
   assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[\"\"],\"teamId\":\"T\",\"signingIdentifier\":\"id\"}}}\n", "trustedPublishers.App.paths[0] expected non-empty string");
   assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[\"relative\"],\"teamId\":\"T\",\"signingIdentifier\":\"id\"}}}\n", "trustedPublishers.App.paths[0] expected absolute executable path");
-  assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[\"/Applications/App.app/*\"],\"teamId\":\"T\",\"signingIdentifier\":\"id\"}}}\n", "wildcard paths are not supported");
+  assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[\"/Applications/*/App\"],\"teamId\":\"T\",\"signingIdentifier\":\"id\"}}}\n", "wildcard is supported only as a final /*");
+  assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[\"/*\"],\"teamId\":\"T\",\"signingIdentifier\":\"id\"}}}\n", "wildcard is supported only as a final /*");
   assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[123],\"teamId\":\"T\",\"signingIdentifier\":\"id\"}}}\n", "trustedPublishers.App.paths[0] expected non-empty string");
   assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[\"/A\"],\"signingIdentifier\":\"id\"}}}\n", "trustedPublishers.App.teamId expected non-empty string");
   assert_config_error("{\"trustedPublishers\":{\"App\":{\"paths\":[\"/A\"],\"teamId\":\"\",\"signingIdentifier\":\"id\"}}}\n", "trustedPublishers.App.teamId expected non-empty string");
@@ -1852,14 +1899,16 @@ static void test_config_backend_editing(void){
   free(text);
   capture_free(&cap);
 
-  const char *publisher_paths[] = { publisher_exe, publisher_helper };
-  SetPublisherCtx set_pub = { config, "Alpha Publisher", "Alpha Publisher Edited", publisher_paths, 2, "TEAMID1234", "com.example.App", &platform };
+  char publisher_prefix[PATH_MAX]; snprintf(publisher_prefix, sizeof(publisher_prefix), "%s/*", dir);
+  const char *publisher_paths[] = { publisher_exe, publisher_helper, publisher_prefix };
+  SetPublisherCtx set_pub = { config, "Alpha Publisher", "Alpha Publisher Edited", publisher_paths, 3, "TEAMID1234", "com.example.App", &platform };
   cap = capture_call(call_set_publisher, &set_pub);
   assert(cap.rc == 0);
   text = must_read(config);
   assert_not_contains(text, "\"Alpha Publisher\":");
   assert_contains(text, "\"Alpha Publisher Edited\"");
   assert_contains(text, publisher_helper);
+  assert_contains(text, publisher_prefix);
   free(text);
   capture_free(&cap);
 
@@ -2385,6 +2434,18 @@ static void test_check_config(void){
   cap = capture_check_platform(config, &platform);
   assert(cap.rc == 0);
   assert_contains(cap.out, "current executable signature is invalid");
+  capture_free(&cap);
+
+  snprintf(publisher_config, sizeof(publisher_config),
+    "{\"version\":2,\"trustedPublishers\":{\"Publisher Prefix\":{\"paths\":[\"%s/*\"],\"teamId\":\"TEAMID1234\",\"signingIdentifier\":\"com.example.App\"}},\"allowProcesses\":{},\"allowRemoteHosts\":[]}\n",
+    dir);
+  write_text_mode(config, publisher_config, 0600);
+  state = (FakePlatformState){ .team_id = "TEAMID1234", .signing_identifier = "com.example.App" };
+  platform = fake_platform(&state);
+  cap = capture_check_platform(config, &platform);
+  assert(cap.rc == 0);
+  assert_contains(cap.out, "Config OK.");
+  assert(state.identity_calls == 0);
   capture_free(&cap);
 
   snprintf(publisher_config, sizeof(publisher_config),
@@ -3624,6 +3685,7 @@ int main(void){
   test_system_paths();
   test_policy_priority();
   test_trusted_publisher_policy();
+  test_trusted_publisher_prefix_policy();
   test_trusted_app_bundle_policy();
   test_apple_signature_policy();
   test_temp_executable_rejected();

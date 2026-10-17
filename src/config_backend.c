@@ -531,7 +531,22 @@ typedef struct {
 } SetPublisherEdit;
 
 static int validate_publisher_path(const char *path, const char *team_id, const char *signing_identifier, const NetwatchPlatform *platform, char *err, size_t err_len){
-  if (!path || path[0] != '/' || strchr(path, '*')) return set_error(err, err_len, "trusted publisher path must be an exact absolute executable path"), 0;
+  if (!path || path[0] != '/') return set_error(err, err_len, "trusted publisher path must be absolute"), 0;
+  const char *star = strchr(path, '*');
+  size_t path_len = strlen(path);
+  if (star && (path_len < 3 || star != path + path_len - 1 || star[-1] != '/')){
+    return set_error(err, err_len, "trusted publisher wildcard is supported only as a final /* directory prefix"), 0;
+  }
+  if (star){
+    char root[PATH_MAX];
+    if (path_len - 2 >= sizeof(root)) return set_error(err, err_len, "trusted publisher prefix root is too long"), 0;
+    memcpy(root, path, path_len - 2); root[path_len - 2] = 0;
+    struct stat st;
+    if (platform->stat_path(platform, root, &st) != 0 || !S_ISDIR(st.st_mode)){
+      return set_error(err, err_len, "trusted publisher prefix root must exist and be a directory"), 0;
+    }
+    return 1;
+  }
   if (platform->access_path(platform, path, F_OK) != 0) return set_error(err, err_len, "trusted publisher executable does not exist"), 0;
   CodeSignatureIdentity actual = {0};
   CodeSignatureIdentityResult result = platform->code_signature_identity(platform, path, &actual, err, err_len);

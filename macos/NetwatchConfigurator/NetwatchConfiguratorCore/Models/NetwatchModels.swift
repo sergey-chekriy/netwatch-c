@@ -183,7 +183,10 @@ public struct TrustedPublisherEditForm: Equatable {
     var seen = Set<String>()
     for path in paths {
       if !path.hasPrefix("/") { return "Publisher paths must be absolute." }
-      if path.contains("*") { return "Trusted publisher paths must be exact; wildcards are not supported." }
+      if let star = path.firstIndex(of: "*"),
+         star != path.index(before: path.endIndex) || path.count < 3 || path[path.index(before: star)] != "/" {
+        return "Publisher wildcard is supported only as a final /* directory prefix."
+      }
       if seen.contains(path) { return "Duplicate publisher paths are not allowed." }
       seen.insert(path)
     }

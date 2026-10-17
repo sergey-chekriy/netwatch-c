@@ -3,6 +3,7 @@
 #include "cJSON.h"
 #include "util.h"
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -208,6 +209,20 @@ static int warn_trusted_publishers(const Config *cfg, const NetwatchPlatform *pl
     for (size_t j = 0; j < rule->paths.len; j++){
       char where[256]; snprintf(where, sizeof(where), "trustedPublishers.%s.paths[%zu]", rule->name, j);
       const char *path = rule->paths.items[j];
+      size_t path_len = strlen(path);
+      if (path_len >= 3 && !strcmp(path + path_len - 2, "/*")){
+        char root[PATH_MAX];
+        if (path_len - 2 >= sizeof(root)){
+          if (!issues_push(warnings, where, "publisher prefix root is too long")) return 0;
+          continue;
+        }
+        memcpy(root, path, path_len - 2); root[path_len - 2] = 0;
+        struct stat st;
+        if (platform->stat_path(platform, root, &st) != 0 || !S_ISDIR(st.st_mode)){
+          if (!issues_push(warnings, where, "publisher prefix root does not currently exist: %s", root)) return 0;
+        }
+        continue;
+      }
       if (platform->access_path(platform, path, F_OK) != 0){
         if (!issues_push(warnings, where, "executable does not currently exist: %s", path)) return 0;
         continue;

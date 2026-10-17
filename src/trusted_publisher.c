@@ -49,6 +49,27 @@ static int same_path(const char *left, const char *right){
   return 0;
 }
 
+static int path_inside(const char *path, const char *root){
+  size_t n = strlen(root);
+  return !strncmp(path, root, n) && path[n] == '/';
+}
+
+static int publisher_path_match(const char *path, const char *rule){
+  size_t n = strlen(rule);
+  if (n < 3 || strcmp(rule + n - 2, "/*")) return same_path(path, rule);
+
+  char *root = malloc(n - 1);
+  if (!root) return -1;
+  memcpy(root, rule, n - 2); root[n - 2] = 0;
+  char canonical_root[PATH_MAX], canonical_path[PATH_MAX];
+  int lexical_match = path_inside(path, root);
+  int root_ok = realpath(root, canonical_root) != NULL;
+  free(root);
+  if (!root_ok || !realpath(path, canonical_path)) return lexical_match ? -1 : 0;
+  if (path_inside(canonical_path, canonical_root)) return 1;
+  return lexical_match ? -1 : 0;
+}
+
 static TrustedPublisherCheck check_result(TrustedPublisherResult result, const TrustedPublisherRule *rule, const char *path){
   return (TrustedPublisherCheck){ .result = result, .rule = rule, .matched_path = path };
 }
@@ -99,10 +120,13 @@ static TrustedPublisherResult map_identity_result(CodeSignatureIdentityResult re
 
 TrustedPublisherCheck trusted_publisher_check_rule(const TrustedPublisherRule *rule, const char *path, const struct NetwatchPlatform *platform){
   if (!rule || !path || !*path) return check_result(TRUSTED_PUBLISHER_PATH_NOT_MATCHED, NULL, NULL);
-  const char *matched = NULL;
+  const char *matched = NULL, *unsafe = NULL;
   for (size_t i = 0; i < rule->paths.len; i++){
-    if (same_path(path, rule->paths.items[i])){ matched = rule->paths.items[i]; break; }
+    int match = publisher_path_match(path, rule->paths.items[i]);
+    if (match > 0){ matched = rule->paths.items[i]; break; }
+    if (match < 0 && !unsafe) unsafe = rule->paths.items[i];
   }
+  if (!matched && unsafe) return check_result(TRUSTED_PUBLISHER_SECURITY_ERROR, rule, unsafe);
   if (!matched) return check_result(TRUSTED_PUBLISHER_PATH_NOT_MATCHED, NULL, NULL);
   if (!platform || !platform->code_signature_identity) return check_result(TRUSTED_PUBLISHER_SECURITY_ERROR, rule, matched);
 

@@ -493,7 +493,20 @@ Add or remove trusted publisher rules:
   --config /path/to/netwatch.config.json
 ```
 
-Adding a trusted publisher requires the executable to exist and its current Security.framework identity to match the provided Team ID and signing identifier. The command does not infer or invent identity values.
+Adding an exact trusted publisher path requires the executable to exist and its current Security.framework identity to match the provided Team ID and signing identifier. A directory prefix requires its root directory to exist and is verified against each executable only at runtime. The command does not infer or invent identity values.
+
+For signed tools installed below versioned directories, a publisher path may end in `/*`:
+
+```bash
+./netwatch --config-set-trusted-publisher "Codex app-server" \
+  --name "Codex app-server" \
+  --path "$HOME/.codex/packages/app-server-daemon/releases/*" \
+  --team-id "2DC432GLL2" \
+  --signing-identifier "codex" \
+  --config /path/to/netwatch.config.json
+```
+
+This matches descendants of the canonical directory but still requires a valid signature and exact Team ID and signing identifier.
 
 Add or remove a signed app bundle rule:
 
@@ -657,7 +670,7 @@ Validate a config without starting monitoring:
 
 Exit status is `0` for a valid config, including valid configs with warnings. Invalid JSON, unsupported schema versions, wrong required types, unsupported `allowProcesses`, `trustedPublishers`, or `trustedAppBundles` value types, unreadable files, and command-line usage errors return non-zero.
 
-The checker reuses the normal config parser, then reports warnings for duplicate allow or deny entries where detectable, duplicate trusted publisher exact paths, invalid wildcard placement, malformed or missing executable paths and app bundle roots, Apple trust verification failures for Apple-system-looking allow entries when automatic Apple trust is enabled, trusted publisher identity mismatches for currently installed executables, and deny rules that appear to shadow allow entries.
+The checker reuses the normal config parser, then reports warnings for duplicate allow or deny entries where detectable, duplicate trusted publisher paths, invalid wildcard placement, malformed or missing executable paths, publisher prefix roots and app bundle roots, Apple trust verification failures for Apple-system-looking allow entries when automatic Apple trust is enabled, trusted publisher identity mismatches for currently installed executables, and deny rules that appear to shadow allow entries.
 
 Examples:
 
@@ -887,12 +900,12 @@ Automatic trust requires both an approved system path and a valid Apple code sig
 }
 ```
 
-Each entry requires exact executable `paths`, `teamId`, and `signingIdentifier`. `requireValidSignature` may be omitted or set to `true`; `false` is rejected. Wildcard paths are not supported for trusted publisher rules. Path matching is exact; when both paths exist, `netwatch` also accepts `realpath()`-equivalent paths so symlinked references to the same executable do not create a separate identity. Use `allowProcesses` for path-only rules and suffix wildcards.
+Each entry requires executable `paths`, `teamId`, and `signingIdentifier`. Paths are exact unless they end in `/*`, which safely covers descendants of one canonical directory for versioned installations. Other wildcard forms are rejected. `requireValidSignature` may be omitted or set to `true`; `false` is rejected. Exact paths accept `realpath()`-equivalent references. Prefix paths canonicalize both the root and executable and reject symlink escapes. Use `allowProcesses` only for weaker path-only rules.
 
 Runtime verification uses Security.framework to require all of these at the same time:
 
 ```text
-configured executable path
+configured executable path or canonical directory prefix
 valid code signature
 exact Team Identifier
 exact signing identifier
@@ -900,7 +913,7 @@ exact signing identifier
 
 Hashes are intentionally not used for allow/block decisions. Normal app updates can change binary contents, executable hash, version, and modification time while preserving Team ID, signing identifier, and executable path.
 
-The Team ID is always bound to the configured executable path. A matching Team ID on a different path is not trusted. If multiple trusted publisher rules match one executable path, any successful rule allows it as `TRUSTED_PUBLISHER`; if all matching rules fail, the executable is treated as unknown and is not allowed later by a matching `allowProcesses` path or Apple system trust. `--check-config` warns about duplicate exact publisher paths so ambiguous configs can be cleaned up.
+The Team ID is always bound to the configured executable path or directory prefix. A matching Team ID outside that scope is not trusted. If multiple trusted publisher rules match one executable path, any successful rule allows it as `TRUSTED_PUBLISHER`; if all matching rules fail, the executable is treated as unknown and is not allowed later by a matching `allowProcesses` path or Apple system trust. `--check-config` warns about duplicate publisher paths so ambiguous configs can be cleaned up.
 
 To inspect identity for an installed app while preparing a rule:
 

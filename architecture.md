@@ -408,10 +408,13 @@ succeed, evaluation fails closed with a deterministic diagnostic failure reason.
 
 The `trusted_publisher` module compares:
 
-- exact configured executable path, with `realpath()` equivalence where both paths exist;
+- exact configured executable path, or a final `/*` canonical directory prefix;
 - valid code signature;
 - exact Team Identifier;
 - exact signing identifier.
+
+Directory prefixes canonicalize both the prefix root and executable. A lexical match that cannot
+be canonicalized or resolves outside the root fails closed, preventing symlink escapes.
 
 The platform layer obtains signed identity metadata with Security.framework. It validates the
 signature before reading `kSecCodeInfoTeamIdentifier` and `kSecCodeInfoIdentifier`. The runtime
@@ -420,7 +423,7 @@ times for trusted publisher decisions.
 
 ### 10.3.1 Trusted app bundle verification
 
-Trusted app bundle rules are separate from exact `trustedPublishers` and path-only
+Trusted app bundle rules are separate from identity-checked `trustedPublishers` and path-only
 `allowProcesses`. The evaluator canonicalizes both paths, requires component-aware containment,
 rejects symlink escapes, validates the helper signature, matches Team ID exactly, and matches the
 signing identifier against an explicit exact or prefix list. A matching bundle rule that fails any
